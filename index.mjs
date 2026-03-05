@@ -373,7 +373,26 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     const agentCount = state.agents.length;
     let msg = `Registered ${id}${isManager ? ' as manager' : ''}. ${agentCount} agent(s) registered.`;
-    if (isManager) msg += ' Keepalive watcher running.\n\nRead ~/.claude/reference/managing-agents.md before proceeding.';
+
+    const refPath = `${os.homedir()}/.claude/reference/managing-agents.md`;
+    const repoRefPath = path.join(__dirname, 'managing-agents.md');
+    const refExists = fs.existsSync(refPath);
+
+    if (isManager) {
+      msg += ' Keepalive watcher running.';
+      if (refExists) {
+        msg += '\n\nRead ~/.claude/reference/managing-agents.md before proceeding.';
+      } else {
+        msg += `\n\n⚠ ~/.claude/reference/managing-agents.md not found. Symlink it:\n  ln -s ${repoRefPath} ${refPath}\n\nFor now, read ${path.join(__dirname, 'CLAUDE.md')} for tool reference.`;
+      }
+    } else {
+      if (refExists) {
+        msg += '\n\nSee ~/.claude/reference/managing-agents.md for how to work with the manager.';
+      } else {
+        msg += `\n\nSee ${path.join(__dirname, 'CLAUDE.md')} for tool reference.`;
+      }
+    }
+
     return { content: [{ type: 'text', text: msg }] };
   }
 
