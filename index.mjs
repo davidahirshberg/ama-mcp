@@ -153,7 +153,7 @@ function sendMessage(win, message) {
   const escaped = message.replace(/'/g, `'\\''`);
   execSync(`${BIN}/agent-ask ${win} '${escaped}'`, { timeout: 15000 });
 
-  // Safety net: agent-ask now sends text+enter atomically via --stdin,
+  // Safety net: agent-ask sends text+enter back-to-back (no sleep between),
   // but verify it went through. If text is still at the prompt, retry enter.
   for (let attempt = 0; attempt < 3; attempt++) {
     execSync(`sleep ${0.5 + attempt * 0.3}`);
