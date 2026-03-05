@@ -1,21 +1,21 @@
 #!/usr/bin/env node
 /**
- * Agent Manager MCP Server
+ * Agent Manager MCP Server v3.0
  *
- * Coordinates agents via shared state file. Communication is MCP-native:
- * agents call wait_for_task() to receive work, chat() to send messages.
- * No kitty terminal scraping for normal communication.
+ * Coordinates agents via shared state file + kitty kicks for notifications.
+ * All agents register at startup. Communication goes through the state file;
+ * kitty sends a nudge so agents know to check.
  *
  * Tools:
+ *   - register(manager?, session_id?)    register this agent (all agents call this)
  *   - delegate(agent, description, message)  assign task (manager only)
- *   - chat(message, to?)                     send message to another agent
- *   - wait_for_task(timeout?)                block until task/message arrives
- *   - wait_for_any(timeout?)                 block until any agent reports
- *   - task_list()                            show active tasks
- *   - task_done(agent)                       mark task complete
- *   - task_check(agent)                      read agent's kitty window (escape hatch)
- *   - my_task()                              show own task
- *   - register_manager()                     register as manager
+ *   - chat(message, to?)                 send message + kick recipient
+ *   - wait_for_task(timeout?)            block until task/message arrives
+ *   - wait_for_any(timeout?)             block until any agent reports
+ *   - task_list()                        show active tasks + registered agents
+ *   - task_done(agent?)                  mark task complete
+ *   - task_check(win)                    read agent's kitty window (escape hatch)
+ *   - my_task()                          show own task + unread messages
  */
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -43,11 +43,12 @@ function loadState() {
     try { return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')); }
     catch { }
   }
-  return { tasks: [], messages: [] };
+  return { tasks: [], messages: [], agents: [] };
 }
 
 function saveState(state) {
   if (!state.messages) state.messages = [];
+  if (!state.agents) state.agents = [];
   fs.mkdirSync(`${os.homedir()}/.claude`, { recursive: true });
   fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
 }
@@ -73,7 +74,6 @@ function unblockDependents(state, completedId) {
   for (const t of state.tasks) {
     if (t.status === 'blocked' && t.blockedBy) {
       if (!isBlocked(state, t)) {
-        // All deps done — activate. Agent's wait_for_task() will pick it up.
         t.status = 'pending';
         unblocked.push(t);
       }
@@ -89,7 +89,7 @@ function now() {
 function requireManager() {
   if (!ME) return 'Cannot identify caller — $AGENT_WIN not set.';
   const state = loadState();
-  if (state.manager_win !== ME) return `Only the manager (win ${state.manager_win ?? 'unregistered'}) can do this. You are win ${ME}.`;
+  if (state.manager !== ME) return `Only the manager (win ${state.manager ?? 'unregistered'}) can do this. You are win ${ME}.`;
   return null;
 }
 
@@ -98,6 +98,41 @@ function resolveAgent(val) {
   if (typeof val === 'number') return val;
   if (typeof val === 'string' && /^\d+$/.test(val)) return parseInt(val);
   return val; // string agent name (e.g. "todd")
+}
+
+// ---- Agent registry ----
+
+function getAgent(state, id) {
+  if (!state.agents) return null;
+  return state.agents.find(a => a.id === id || a.kitty_win === id || a.name === id);
+}
+
+function removeAgent(state, id) {
+  if (!state.agents) return;
+  state.agents = state.agents.filter(a => a.id !== id && a.kitty_win !== id && a.name !== id);
+}
+
+function kittyWindowExists(win) {
+  try {
+    execSync(`${BIN}/agent-read ${win} 2>/dev/null | head -1`, { encoding: 'utf8', timeout: 5000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Lazy cleanup: check if agent's kitty window still exists. Remove if not.
+function checkAgent(state, id) {
+  const agent = getAgent(state, id);
+  if (!agent) return false;
+  if (agent.kitty_win) {
+    if (!kittyWindowExists(agent.kitty_win)) {
+      removeAgent(state, id);
+      saveState(state);
+      return false;
+    }
+  }
+  return true;
 }
 
 // ---- Message helpers ----
@@ -119,7 +154,18 @@ function markRead(state, agent) {
   }
 }
 
-// ---- Kitty helpers (escape hatch only) ----
+// ---- Kitty helpers ----
+
+function kickAgent(kittyWin, message) {
+  try {
+    execSync(`${BIN}/agent-ask ${kittyWin} ${JSON.stringify(message)}`, {
+      encoding: 'utf8', timeout: 10000,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 function readWindow(win) {
   try {
@@ -145,18 +191,43 @@ function windowTail(output, n = 40) {
   return output.split('\n').slice(-n).join('\n');
 }
 
+// Kick an agent via kitty if they have a window. Returns whether kick was sent.
+function notifyAgent(state, agentId, message) {
+  const agent = getAgent(state, agentId);
+  if (!agent || !agent.kitty_win) return false;
+  const sent = kickAgent(agent.kitty_win, message);
+  if (!sent) {
+    // Window gone — clean up
+    removeAgent(state, agentId);
+    saveState(state);
+  }
+  return sent;
+}
+
 // ---- MCP server ----
 
 const server = new Server(
-  { name: 'agent-manager', version: '2.0.0' },
+  { name: 'agent-manager', version: '3.0.0' },
   { capabilities: { tools: {} } }
 );
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
+      name: 'register',
+      description: 'Register this agent. All agents call this at session start. Pass manager=true to register as manager.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          manager: { type: 'boolean', description: 'Register as manager (default false)' },
+          session_id: { type: 'string', description: 'Claude session ID (for JSONL lookup)' },
+          name: { type: 'string', description: 'Agent name (for headless agents without kitty window)' },
+        },
+      },
+    },
+    {
       name: 'delegate',
-      description: 'Assign a task to an agent. The agent receives it via wait_for_task(). Manager only.',
+      description: 'Assign a task to an agent. Kicks the agent via kitty so they know to check. Manager only.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -170,7 +241,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'chat',
-      description: 'Send a message to another agent (or the manager if "to" is omitted). Delivered via shared state — the recipient sees it on their next wait_for_task() or wait_for_any() call.',
+      description: 'Send a message to another agent (or the manager if "to" is omitted). Writes to state file and kicks recipient via kitty.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -203,7 +274,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'task_list',
-      description: 'List all active (non-done) tasks with status. Call at session start.',
+      description: 'List all active (non-done) tasks and registered agents. Call at session start.',
       inputSchema: { type: 'object', properties: {} },
     },
     {
@@ -229,19 +300,106 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'my_task',
-      description: 'Show what task is assigned to this agent. Uses $AGENT_WIN to identify caller.',
+      description: 'Show what task is assigned to this agent and any unread messages.',
+      inputSchema: { type: 'object', properties: {} },
+    },
+    // Keep register_manager as alias for backward compat (keepalive watcher calls it)
+    {
+      name: 'register_manager',
+      description: 'Register as manager. Alias for register(manager=true).',
       inputSchema: { type: 'object', properties: {} },
     },
     {
-      name: 'register_manager',
-      description: 'Register as manager. Auto-detects window from $AGENT_WIN. Starts keepalive watcher.',
-      inputSchema: { type: 'object', properties: {} },
+      name: 'unregister_manager',
+      description: 'Step down as manager. Pass "to" to hand it to a specific agent. Manager only.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          to: { type: ['number', 'string'], description: 'Agent to pass manager role to. Omit to just vacate.' },
+        },
+      },
     },
   ],
 }));
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
+
+  // ---- register ----
+  if (name === 'register' || name === 'register_manager') {
+    const isManager = name === 'register_manager' || args.manager === true;
+    const agentName = args.name || null;
+
+    // Need either AGENT_WIN or a name
+    if (!ME && !agentName) {
+      return { content: [{ type: 'text', text: '$AGENT_WIN not set and no name provided. Set AGENT_WIN or pass name for headless agents.' }], isError: true };
+    }
+
+    const state = loadState();
+    if (!state.agents) state.agents = [];
+
+    const id = ME || agentName;
+
+    // Guard: can't claim manager if someone else already is
+    if (isManager && state.manager && state.manager !== id) {
+      return { content: [{ type: 'text', text: `Manager already registered (${state.manager}). Only the current manager can re-register as manager.` }], isError: true };
+    }
+
+    // Upsert: remove old entry for this agent
+    removeAgent(state, id);
+
+    const entry = {
+      id,
+      registered_at: now(),
+    };
+    if (ME) entry.kitty_win = ME;
+    if (agentName) entry.name = agentName;
+    if (args.session_id) entry.session_id = args.session_id;
+    if (isManager) entry.is_manager = true;
+
+    state.agents.push(entry);
+
+    if (isManager) {
+      state.manager = id;
+      // Start keepalive if not already running
+      try {
+        execSync(`pgrep -f ${BIN}/agent-keepalive`, { encoding: 'utf8', timeout: 5000 });
+      } catch {
+        exec(`${BIN}/agent-keepalive`, { detached: true, stdio: 'ignore' }).unref();
+      }
+    }
+
+    saveState(state);
+
+    const agentCount = state.agents.length;
+    let msg = `Registered ${id}${isManager ? ' as manager' : ''}. ${agentCount} agent(s) registered.`;
+    if (isManager) msg += ' Keepalive watcher running.\n\nRead ~/.claude/reference/managing-agents.md before proceeding.';
+    return { content: [{ type: 'text', text: msg }] };
+  }
+
+  // ---- unregister_manager ----
+  if (name === 'unregister_manager') {
+    const guard = requireManager();
+    if (guard) return { content: [{ type: 'text', text: guard }], isError: true };
+    const state = loadState();
+    const oldAgent = getAgent(state, ME);
+    if (oldAgent) delete oldAgent.is_manager;
+
+    const to = args.to != null ? resolveAgent(args.to) : null;
+    if (to) {
+      const newManager = getAgent(state, to);
+      if (!newManager) return { content: [{ type: 'text', text: `Agent ${to} not registered.` }], isError: true };
+      newManager.is_manager = true;
+      state.manager = to;
+      saveState(state);
+      notifyAgent(state, to, `You are now the manager. Call register_manager() to start keepalive. — former manager (win ${ME})`);
+      return { content: [{ type: 'text', text: `Passed manager to ${to}.` }] };
+    }
+
+    delete state.manager;
+    saveState(state);
+    return { content: [{ type: 'text', text: `Stepped down as manager. Manager slot is now open.` }] };
+  }
 
   // ---- delegate ----
   if (name === 'delegate') {
@@ -265,7 +423,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const task = {
       id: taskId,
       agent,
-      // Keep 'win' as alias for backward compat with task_check
       ...(typeof agent === 'number' ? { win: agent } : {}),
       description,
       message,
@@ -273,27 +430,28 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       status: blocked ? 'blocked' : 'pending',
       last_checked: now(),
     };
-    if (blocked) {
-      task.blockedBy = blockedBy;
-    } else if (blockedBy.length > 0) {
-      task.blockedBy = blockedBy;
-    }
+    if (blockedBy.length > 0) task.blockedBy = blockedBy;
     state.tasks.push(task);
     saveState(state);
 
+    // Kick agent via kitty if not blocked
+    let kicked = false;
+    if (!blocked) {
+      kicked = notifyAgent(state, agent, `New task assigned: ${description}. Call wait_for_task() to receive it.`);
+    }
+
     const pendingCount = state.tasks.filter(t => t.status === 'pending').length;
     const blockedCount = state.tasks.filter(t => t.status === 'blocked').length;
-    const idleAgents = state.tasks.filter(t => t.status === 'idle').map(t => t.agent);
     let nudge = `${pendingCount} pending`;
     if (blockedCount > 0) nudge += `, ${blockedCount} blocked`;
     nudge += '.';
-    if (idleAgents.length > 0) nudge += ` Idle agents: ${idleAgents.join(', ')}. Any tasks for them?`;
     if (pendingCount > 0) nudge += ' Call wait_for_any() to monitor.';
     const statusMsg = blocked ? `Queued (blocked by ${blockedBy.join(', ')})` : 'Delegated';
+    const kickMsg = kicked ? ' (kicked)' : (!blocked && getAgent(state, agent) ? ' (no kitty window — agent must poll)' : '');
     return {
       content: [{
         type: 'text',
-        text: `${statusMsg} to ${agent} [${taskId}]: ${description}\n${nudge}`,
+        text: `${statusMsg} to ${agent} [${taskId}]: ${description}${kickMsg}\n${nudge}`,
       }],
     };
   }
@@ -304,7 +462,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     let to = args.to != null ? resolveAgent(args.to) : null;
     if (to == null) {
       const state = loadState();
-      to = state.manager_win;
+      to = state.manager;
       if (!to) return { content: [{ type: 'text', text: 'No recipient specified and no manager registered.' }], isError: true };
     }
     const from = ME || 'unknown';
@@ -312,19 +470,23 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     postMessage(state, to, from, message);
     saveState(state);
 
+    // Kick recipient
+    const kicked = notifyAgent(state, to, `New message from ${from}. Call my_task() to read it.`);
+
     let warning = '';
-    if (ME && state.manager_win === ME && message.length > 200) {
+    if (ME && state.manager === ME && message.length > 200) {
       warning = '\n\n⚠ Long message (>200 chars). If assigning work, use delegate() instead.';
     }
 
-    return { content: [{ type: 'text', text: `Message queued for ${to}.${warning}` }] };
+    const kickMsg = kicked ? ' (kicked)' : '';
+    return { content: [{ type: 'text', text: `Message queued for ${to}${kickMsg}.${warning}` }] };
   }
 
   // ---- wait_for_task ----
   if (name === 'wait_for_task') {
     if (!ME) return { content: [{ type: 'text', text: '$AGENT_WIN not set.' }], isError: true };
     const timeoutMs = Math.min(args.timeout ?? 600, 600) * 1000;
-    const intervalMs = 5000; // poll every 5s — state file is local, cheap to read
+    const intervalMs = 5000;
     const deadline = Date.now() + timeoutMs;
 
     while (Date.now() < deadline) {
@@ -349,7 +511,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return {
           content: [{
             type: 'text',
-            text: `Task assigned [${task.id}]: ${task.description}\n\n${task.message}\n\nUse chat() to report progress, results, or issues. Call task_done() or chat() when finished.`,
+            text: `Task assigned [${task.id}]: ${task.description}\n\n${task.message}\n\nUse chat() to report progress, results, or issues. Call task_done() when finished.`,
           }],
         };
       }
@@ -366,7 +528,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const intervalMs = Math.min(args.interval ?? 15, 120) * 1000;
     const deadline = Date.now() + timeoutMs;
 
-    // Snapshot what we've already seen so we only report new things
     let lastState = loadState();
     const seenMessageCount = (lastState.messages || []).filter(m => m.to === ME).length;
 
@@ -377,7 +538,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const myMessages = (state.messages || []).filter(m => m.to === ME);
       if (myMessages.length > seenMessageCount) {
         const newMsgs = myMessages.slice(seenMessageCount);
-        // Mark them read
         for (const m of newMsgs) m.read = true;
         saveState(state);
         const formatted = newMsgs.map(m => `[from ${m.from}] ${m.text}`).join('\n\n');
@@ -393,7 +553,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
-      // Check for tasks that became idle (agent marked themselves done via state)
+      // Check for tasks that became idle
       const nowIdle = state.tasks.filter(t => t.status === 'idle');
       const wasIdle = lastState.tasks.filter(t => t.status === 'idle').map(t => t.id);
       const newlyIdle = nowIdle.filter(t => !wasIdle.includes(t.id));
@@ -411,9 +571,23 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
-      // Check for blocked tasks that got unblocked
-      const pendingNoAck = state.tasks.filter(t => t.status === 'pending' && !t.acknowledged);
-      // These will be picked up by the agent's wait_for_task — nothing to report yet
+      // Check for newly done tasks
+      const nowDone = state.tasks.filter(t => t.status === 'done');
+      const wasDone = lastState.tasks.filter(t => t.status === 'done').map(t => t.id);
+      const newlyDone = nowDone.filter(t => !wasDone.includes(t.id));
+      if (newlyDone.length > 0) {
+        const t = newlyDone[0];
+        const remaining = state.tasks.filter(tt => tt.status !== 'done' && tt.status !== 'blocked').length;
+        const next = remaining > 0
+          ? `\n\n${remaining} task(s) still active. Call wait_for_any() again.`
+          : '\n\nNo other active tasks.';
+        return {
+          content: [{
+            type: 'text',
+            text: `Agent ${t.agent} completed [${t.id}: ${t.description}]${next}`,
+          }],
+        };
+      }
 
       lastState = state;
       const wait = Math.min(intervalMs, deadline - Date.now());
@@ -427,8 +601,26 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   if (name === 'task_list') {
     const state = loadState();
     const active = state.tasks.filter(t => t.status !== 'done');
+    const agents = state.agents || [];
+
+    let text = '';
+
+    // Show registered agents
+    if (agents.length > 0) {
+      const agentLines = agents.map(a => {
+        let label = `${a.id}`;
+        if (a.name) label += ` (${a.name})`;
+        if (a.is_manager) label += ' [manager]';
+        if (a.session_id) label += ` session:${a.session_id.slice(0, 8)}`;
+        if (a.kitty_win) label += ` kitty:${a.kitty_win}`;
+        return label;
+      });
+      text += `Agents: ${agentLines.join(', ')}\n\n`;
+    }
+
     if (!active.length) {
-      return { content: [{ type: 'text', text: 'No active tasks.' }] };
+      text += 'No active tasks.';
+      return { content: [{ type: 'text', text }] };
     }
 
     const lines = active.map(t => {
@@ -443,12 +635,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       return `[${t.id}] ${t.agent} | ${status} | ${t.description} | ${age}m ago`;
     });
 
+    text += lines.join('\n');
+
     const working = active.filter(t => t.status === 'working');
     const pending = active.filter(t => t.status === 'pending');
     const idle = active.filter(t => t.status === 'idle');
     const blocked = active.filter(t => t.status === 'blocked');
 
-    // Check for unread messages
     const unread = ME ? getUnread(state, ME) : [];
 
     let nudge = '';
@@ -457,16 +650,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     if (working.length > 0) nudge += `\n\n${working.length} working — call wait_for_any() to monitor.`;
     if (pending.length > 0) nudge += ` ${pending.length} pending (awaiting agent pickup).`;
     if (blocked.length > 0) nudge += ` ${blocked.length} blocked.`;
-    return { content: [{ type: 'text', text: lines.join('\n') + nudge }] };
+    return { content: [{ type: 'text', text: text + nudge }] };
   }
 
   // ---- task_done ----
   if (name === 'task_done') {
-    // Either the manager marks an agent done, or an agent marks itself done
     const agent = args.agent ? resolveAgent(args.agent) : ME;
     if (!agent) return { content: [{ type: 'text', text: 'No agent specified and $AGENT_WIN not set.' }], isError: true };
 
-    // If calling for another agent, must be manager
     if (agent !== ME) {
       const guard = requireManager();
       if (guard) return { content: [{ type: 'text', text: guard }], isError: true };
@@ -481,6 +672,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     task.completed_at = now();
     const unblocked = unblockDependents(state, task.id);
     saveState(state);
+
+    // Kick newly unblocked agents
+    for (const u of unblocked) {
+      notifyAgent(state, u.agent, `Task unblocked: ${u.description}. Call wait_for_task() to receive it.`);
+    }
 
     const remaining = state.tasks.filter(t => t.status !== 'done').length;
     let msg = `Marked ${agent} task done: ${task.description}.`;
@@ -500,7 +696,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const win = args.win;
     const result = readWindow(win);
     if (!result.ok) {
-      return { content: [{ type: 'text', text: `Cannot read win ${win}: ${result.error}` }], isError: true };
+      // Window gone — clean up agent registry
+      const state = loadState();
+      const agent = getAgent(state, win);
+      if (agent) {
+        removeAgent(state, win);
+        saveState(state);
+      }
+      return { content: [{ type: 'text', text: `Cannot read win ${win}: ${result.error}. Agent removed from registry.` }], isError: true };
     }
     const idle = isIdle(result.text);
 
@@ -551,29 +754,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     if (unread.length > 0) {
-      text += `\n\n📬 ${unread.length} unread message(s). Call wait_for_task() to read them.`;
+      // Read and return the messages inline
+      markRead(state, ME);
+      saveState(state);
+      const formatted = unread.map(m => `[from ${m.from}] ${m.text}`).join('\n\n');
+      text += `\n\n📬 Messages:\n\n${formatted}`;
     }
 
     return { content: [{ type: 'text', text }] };
-  }
-
-  // ---- register_manager ----
-  if (name === 'register_manager') {
-    if (!ME) {
-      return { content: [{ type: 'text', text: '$AGENT_WIN not set. Launch claude with the alias.' }], isError: true };
-    }
-    const state = loadState();
-    state.manager_win = ME;
-    saveState(state);
-
-    // Start keepalive if not already running
-    try {
-      execSync(`pgrep -f ${BIN}/agent-keepalive`, { encoding: 'utf8', timeout: 5000 });
-    } catch {
-      exec(`${BIN}/agent-keepalive`, { detached: true, stdio: 'ignore' }).unref();
-    }
-
-    return { content: [{ type: 'text', text: `Registered win ${ME} as manager. Keepalive watcher running.\n\nRead ~/.claude/reference/managing-agents.md before proceeding.` }] };
   }
 
   return { content: [{ type: 'text', text: `Unknown tool: ${name}` }], isError: true };
