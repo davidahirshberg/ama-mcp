@@ -1,8 +1,8 @@
 # ama-mcp
 
-MCP server that coordinates multiple [Claude Code](https://docs.anthropic.com/en/docs/claude-code) sessions through [kitty](https://sw.kovidgoyal.net/kitty/) terminal remote control.
+MCP server that coordinates multiple [Claude Code](https://docs.anthropic.com/en/docs/claude-code) sessions through a shared state file and [kitty](https://sw.kovidgoyal.net/kitty/) terminal notifications.
 
-A "manager" session delegates tasks to worker sessions running in other kitty windows, monitors their progress, and tracks dependencies between tasks. Workers can chat back to the manager without waiting to be polled.
+Agents register at startup. A manager delegates tasks, workers receive them via MCP tools, and kitty sends a nudge ("doorbell") so agents know to check. All message content flows through the state file — kitty never carries the actual message, just the notification.
 
 ## Requirements
 
@@ -39,7 +39,7 @@ Add to your Claude Code MCP config (`~/.claude/settings.json`):
   "mcpServers": {
     "agent-manager": {
       "command": "node",
-      "args": ["/path/to/agent-mcp/index.mjs"]
+      "args": ["/path/to/ama-mcp/index.mjs"]
     }
   }
 }
@@ -47,51 +47,70 @@ Add to your Claude Code MCP config (`~/.claude/settings.json`):
 
 ## Tools
 
+### All agents
+
+| Tool | Description |
+|------|-------------|
+| `register(manager?, session_id?, name?)` | Register this agent. All agents call at session start. |
+| `chat(message, to?)` | Send a message + kick recipient. Omit `to` for manager. |
+| `wait_for_task(timeout?)` | Block until a task or message arrives. |
+| `my_task()` | Show own task and read unread messages. |
+| `task_done(agent?)` | Mark own task done, or another's (manager only). |
+| `task_list()` | List active tasks and registered agents. |
+
 ### Manager-only
 
 | Tool | Description |
 |------|-------------|
-| `delegate(win, description, message, after?)` | Send a tracked task to a worker window. Optional `after` defers until dependencies complete. |
-| `task_done(win)` | Mark a task complete. Auto-unblocks dependents. |
-
-### Available to all agents
-
-| Tool | Description |
-|------|-------------|
-| `register_manager()` | Register the calling session as manager. Auto-starts keepalive watcher. |
-| `chat(message, win?)` | Send a message to another agent. Omit `win` to send to manager. |
-| `task_list()` | List all active tasks with status. |
-| `task_check(win)` | Non-blocking snapshot of a window's state. |
-| `my_task()` | Show what task is assigned to the calling window. |
-| `wait_for_idle(win, timeout?, interval?)` | Block until a specific agent goes idle. |
-| `wait_for_any(timeout?, interval?)` | Block until any pending agent goes idle. |
+| `delegate(agent, description, message, after?)` | Assign a tracked task + kick agent. |
+| `wait_for_any(timeout?, interval?)` | Block until any agent reports. |
+| `unregister_manager(to?)` | Step down or hand off manager role. |
+| `task_check(win)` | Read agent's kitty terminal (escape hatch). |
 
 ## How it works
 
 1. Open several kitty windows, each running `claude`.
-2. In one window, call `register_manager()` — this becomes the manager.
-3. The manager uses `delegate()` to assign tasks to worker windows.
-4. Workers do their work. When done, they go idle (back to the `❯` prompt).
-5. The manager calls `wait_for_any()` to monitor, then reviews output and delegates follow-ups.
-6. Workers can `chat()` back to the manager at any time — to report results, ask questions, or flag issues.
+2. Every agent calls `register()` at startup.
+3. One agent calls `register(manager=true)` — becomes the manager, starts keepalive watcher.
+4. Manager uses `delegate()` to assign tasks — state file records the task, kitty kicks the agent.
+5. Agent sees the kick, calls `wait_for_task()` or `my_task()` to get the task.
+6. Agent works, uses `chat()` to report back (kicks the manager).
+7. Agent finishes, calls `task_done()`.
 
 ### Task dependencies
 
-Tasks can depend on other tasks via the `after` parameter:
-
 ```
-delegate(win=3, description="analyze results", message="...", after="w5-m1abc")
+delegate(agent=3, description="analyze results", message="...", after="w5-m1abc")
 ```
 
-The message is held until `w5-m1abc` is marked done, then sent automatically.
+Task stays blocked until `w5-m1abc` is done, then activates and kicks the agent.
 
 ### Keepalive watcher
 
-A background process (auto-started by `register_manager`) polls every 45 seconds and nudges the manager when agents need attention — idle workers awaiting review, pending tasks, etc. Only kicks the manager, never workers. 5-minute cooldown between kicks.
+Background process (auto-started by `register(manager=true)`) polls every 45 seconds and kicks the manager when agents need attention. 5-minute cooldown between kicks.
 
 ## State
 
-Task state persists in `~/.claude/agent-tasks.json`. Survives context compaction and session restarts.
+Task and message state persists in `~/.claude/agent-tasks.json`. Survives context compaction and session restarts. Agent registry tracks who's online and where to kick them.
+
+## Configuration instructions
+
+[`managing-agents.md`](managing-agents.md) is an example of how to configure Claude Code agent behavior using reference instructions. It covers:
+
+- **Meta session patterns** — how a manager session should handle guidance changes, intervene in other sessions, and identify the right window
+- **Tool usage** — the full tool reference, notification model, agent lifecycle
+- **Behavioral guidelines** — when to intervene, how to monitor, what requires approval
+
+This file is meant to be symlinked into `~/.claude/reference/` and referenced from your `CLAUDE.md`. It's a working example from actual use — not a sanitized template.
+
+```bash
+ln -s /path/to/ama-mcp/managing-agents.md ~/.claude/reference/managing-agents.md
+```
+
+Then in your `CLAUDE.md`:
+```
+- **managing-agents.md** — meta sessions, inter-agent communication, agent-manager MCP tools
+```
 
 ## Provenance
 
