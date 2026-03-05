@@ -28,26 +28,6 @@ import { fileURLToPath } from 'url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const BIN = path.join(__dirname, 'bin');
 
-// ---- Cluster helpers ----
-
-function checkClusterJobs() {
-  try {
-    const out = execSync('ssh qtm "squeue -u skip -h 2>/dev/null"', { encoding: 'utf8', timeout: 15000 });
-    const lines = out.trim().split('\n').filter(l => l.trim());
-    return lines.length;
-  } catch {
-    return 0; // can't reach cluster, don't nag
-  }
-}
-
-function clusterNudge() {
-  const jobs = checkClusterJobs();
-  if (jobs > 0) {
-    return `\n\nNote: ${jobs} cluster job(s) running. Running jobs = pending results = future tasks. Delegate a monitoring task to check on them, or set a timer to check back.`;
-  }
-  return '';
-}
-
 const STATE_FILE = `${os.homedir()}/.claude/agent-tasks.json`;
 
 // ---- State helpers ----
@@ -365,7 +345,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const blocked = state.tasks.filter(t => t.status === 'blocked');
       if (!pending.length) {
         const blockedMsg = blocked.length > 0 ? ` (${blocked.length} blocked — waiting on dependencies)` : '';
-        return { content: [{ type: 'text', text: `No pending tasks to watch.${blockedMsg}` + clusterNudge() }] };
+        return { content: [{ type: 'text', text: `No pending tasks to watch.${blockedMsg}` }] };
       }
 
       for (const task of pending) {
@@ -378,7 +358,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const remaining = state.tasks.filter(t => t.status === 'pending').length;
           const next = remaining > 0
             ? `\n\n${remaining} task(s) still pending. Review this output: what follow-up tasks does it suggest? Delegate them now. Then call wait_for_any() again.`
-            : '\n\nNo other pending tasks. Review this output: what follow-up tasks does it suggest? What gaps remain? If nothing obvious, look around — check project scratch files, TODOs, open questions, recent discussion. Try to find useful work before going idle. Only report to user if genuinely nothing remains.' + clusterNudge();
+            : '\n\nNo other pending tasks. Review this output: what follow-up tasks does it suggest? What gaps remain? If nothing obvious, look around — check project scratch files, TODOs, open questions, recent discussion. Try to find useful work before going idle. Only report to user if genuinely nothing remains.';
           return {
             content: [{
               type: 'text',
@@ -405,7 +385,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const active = state.tasks.filter(t => t.status !== 'done');
     if (!active.length) {
 
-      return { content: [{ type: 'text', text: 'No active delegated tasks.' + clusterNudge() }] };
+      return { content: [{ type: 'text', text: 'No active delegated tasks.' }] };
     }
     // Refresh status from actual window state
     let changed = false;
@@ -467,7 +447,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     if (active > 0) {
       msg += ` ${remaining} pending, ${blockedRemaining} blocked — review idle agents or call wait_for_any().`;
     } else {
-      msg += ' All tasks complete. What does the completed work enable? What gaps remain? Look around — check scratch files, TODOs, open questions, recent discussion, project state. Find useful work before going idle. Only report to user if genuinely nothing remains.' + clusterNudge();
+      msg += ' All tasks complete. What does the completed work enable? What gaps remain? Look around — check scratch files, TODOs, open questions, recent discussion, project state. Find useful work before going idle. Only report to user if genuinely nothing remains.';
     }
     return { content: [{ type: 'text', text: msg }] };
   }

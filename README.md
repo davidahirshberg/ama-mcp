@@ -1,4 +1,4 @@
-# agent-manager
+# ama-mcp
 
 MCP server that coordinates multiple [Claude Code](https://docs.anthropic.com/en/docs/claude-code) sessions through [kitty](https://sw.kovidgoyal.net/kitty/) terminal remote control.
 
@@ -87,7 +87,7 @@ The message is held until `w5-m1abc` is marked done, then sent automatically.
 
 ### Keepalive watcher
 
-A background process (auto-started by `register_manager`) polls every 45 seconds and nudges the manager when agents need attention — idle workers awaiting review, pending tasks, or cluster jobs running. Only kicks the manager, never workers. 5-minute cooldown between kicks.
+A background process (auto-started by `register_manager`) polls every 45 seconds and nudges the manager when agents need attention — idle workers awaiting review, pending tasks, etc. Only kicks the manager, never workers. 5-minute cooldown between kicks.
 
 ## State
 
@@ -95,7 +95,7 @@ Task state persists in `~/.claude/agent-tasks.json`. Survives context compaction
 
 ## Provenance
 
-This was written almost entirely by Claude (Opus), with human direction on design and behavior. The code, docs, and commit messages are AI-generated.
+This was written almost entirely by Claude (Opus), with human direction on design and behavior. The code, docs, and commit messages are AI-generated. The human has not read the code.
 
 ## License
 

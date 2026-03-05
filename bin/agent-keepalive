@@ -63,16 +63,8 @@ if blocked > 0: parts.append(f'{blocked} blocked task(s)')
 print('|'.join(parts))
 " 2>/dev/null)
 
-  cluster_jobs=0
-  cluster_jobs=$(ssh qtm "squeue -u skip -h 2>/dev/null" 2>/dev/null | wc -l | tr -d ' ') || cluster_jobs=0
-
   # Build reason string
-  reason=""
-  [[ -n "$summary" ]] && reason="$summary"
-  [[ "$cluster_jobs" -gt 0 ]] && {
-    [[ -n "$reason" ]] && reason="$reason|"
-    reason="${reason}${cluster_jobs} cluster job(s) running"
-  }
+  reason="$summary"
 
   [[ -z "$reason" ]] && continue
 
