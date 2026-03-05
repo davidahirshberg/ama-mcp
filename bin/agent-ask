@@ -18,7 +18,7 @@ fi
 
 # Escape backslashes so kitty's Python escape interpreter doesn't mangle \n etc.
 escaped=$(printf '%s' "$message" | sed 's/\\/\\\\/g')
+# Send text + enter back-to-back with no sleep — the old 0.2s sleep between them caused the race.
 kitty @ --to "unix:$SOCK" send-text --match "$match" "$escaped" 2>/dev/null || { echo "no window found matching: $pattern" >&2; exit 1; }
-sleep 0.2
 kitty @ --to "unix:$SOCK" send-key --match "$match" enter 2>/dev/null
 echo "sent to $match"

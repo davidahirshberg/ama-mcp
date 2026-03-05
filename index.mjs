@@ -127,16 +127,25 @@ function sendEnter(win) {
 
 function hasUnsubmittedText(output) {
   // Detect text sitting at the ❯ prompt without having been submitted.
-  // After a successful send+enter, the agent starts working (no ❯ line visible)
-  // or shows response output. If ❯ has text after it, enter didn't fire.
   const lines = output.split('\n').filter(l => l.trim());
   const chromePattern = /^[\s─━═\-]+$|^\s*(\?|esc |[0-9]+ bash|\u2193|Context left|Tip:|ctrl\+)/;
   const filtered = lines.filter(l => !chromePattern.test(l));
   if (!filtered.length) return false;
+
+  // Check for pasted-text indicator (long messages get collapsed)
+  if (filtered.some(l => /\[Pasted text.*\+\d+ lines?\]/.test(l))) return true;
+
+  // Check any recent line for ❯ with text (handles wrapped long messages
+  // where the ❯ line is above the last visible line)
+  const tail = filtered.slice(-10);
+  const hasPromptWithText = tail.some(l => /^[❯>]\s+\S/.test(l));
+  if (!hasPromptWithText) return false;
+
+  // Exclude UI messages at the prompt
   const last = filtered[filtered.length - 1];
-  // ❯ with text after it = unsubmitted input (but not UI messages like "Press up to edit")
   if (/Press up to edit|queued messages/.test(last)) return false;
-  return /^[❯>]\s+\S/.test(last);
+
+  return true;
 }
 
 function sendMessage(win, message) {
@@ -144,19 +153,19 @@ function sendMessage(win, message) {
   const escaped = message.replace(/'/g, `'\\''`);
   execSync(`${BIN}/agent-ask ${win} '${escaped}'`, { timeout: 15000 });
 
-  // Verify the enter went through — agent-ask's send-text + send-key is racy.
-  // Check for text sitting at the ❯ prompt (sent but not submitted).
-  execSync('sleep 0.5');
-  const result = readWindow(win);
-  if (result.ok && hasUnsubmittedText(result.text)) {
-    // Text at prompt — enter didn't fire. Retry.
+  // Safety net: agent-ask now sends text+enter atomically via --stdin,
+  // but verify it went through. If text is still at the prompt, retry enter.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    execSync(`sleep ${0.5 + attempt * 0.3}`);
+    const result = readWindow(win);
+    if (!result.ok || !hasUnsubmittedText(result.text)) return; // went through
     sendEnter(win);
-    execSync('sleep 0.5');
-    const retry = readWindow(win);
-    if (retry.ok && hasUnsubmittedText(retry.text)) {
-      // Still stuck after retry
-      throw new Error(`Message sent to win ${win} but enter failed after retry — text sitting at prompt`);
-    }
+  }
+  // Final check
+  execSync('sleep 0.5');
+  const final = readWindow(win);
+  if (final.ok && hasUnsubmittedText(final.text)) {
+    throw new Error(`Message sent to win ${win} but enter failed after 3 retries — text sitting at prompt`);
   }
 }
 
