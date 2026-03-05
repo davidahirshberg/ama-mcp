@@ -2,7 +2,7 @@
 # Usage: agent-read <window-id|pattern>
 # Matches by window ID first, then falls back to title pattern
 SOCK=$(ls -t /tmp/kitty-sock-* 2>/dev/null | head -1)
-[ -z "$SOCK" ] && { echo "no kitty socket found"; exit 1; }
+[ -z "$SOCK" ] && { echo "no kitty socket found" >&2; exit 1; }
 
 pattern="$1"
 
