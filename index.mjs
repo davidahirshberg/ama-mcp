@@ -2,15 +2,20 @@
 /**
  * Agent Manager MCP Server
  *
- * Tracks delegated agent tasks across sessions. Tools:
- *   - delegate(win, description, message)   send task + record
- *   - chat(win, message)                    send non-task message (no tracking)
- *   - wait_for_idle(win, timeout)            block until agent idle
- *   - wait_for_any(timeout)                  block until ANY pending agent idle
- *   - task_list()                            show pending tasks
- *   - task_done(win)                         mark complete
- *   - task_check(win)                        snapshot window now
- *   - register_manager()                     register as manager, start keepalive
+ * Coordinates agents via shared state file. Communication is MCP-native:
+ * agents call wait_for_task() to receive work, chat() to send messages.
+ * No kitty terminal scraping for normal communication.
+ *
+ * Tools:
+ *   - delegate(agent, description, message)  assign task (manager only)
+ *   - chat(message, to?)                     send message to another agent
+ *   - wait_for_task(timeout?)                block until task/message arrives
+ *   - wait_for_any(timeout?)                 block until any agent reports
+ *   - task_list()                            show active tasks
+ *   - task_done(agent)                       mark task complete
+ *   - task_check(agent)                      read agent's kitty window (escape hatch)
+ *   - my_task()                              show own task
+ *   - register_manager()                     register as manager
  */
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -29,6 +34,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const BIN = path.join(__dirname, 'bin');
 
 const STATE_FILE = `${os.homedir()}/.claude/agent-tasks.json`;
+const ME = process.env.AGENT_WIN ? parseInt(process.env.AGENT_WIN) : null;
 
 // ---- State helpers ----
 
@@ -37,16 +43,17 @@ function loadState() {
     try { return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')); }
     catch { }
   }
-  return { tasks: [] };
+  return { tasks: [], messages: [] };
 }
 
 function saveState(state) {
+  if (!state.messages) state.messages = [];
   fs.mkdirSync(`${os.homedir()}/.claude`, { recursive: true });
   fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
 }
 
-function getTask(state, win) {
-  return state.tasks.find(t => t.win === win && t.status !== 'done');
+function getTask(state, agent) {
+  return state.tasks.find(t => t.agent === agent && t.status !== 'done');
 }
 
 function getTaskById(state, id) {
@@ -66,11 +73,7 @@ function unblockDependents(state, completedId) {
   for (const t of state.tasks) {
     if (t.status === 'blocked' && t.blockedBy) {
       if (!isBlocked(state, t)) {
-        // All deps done — send the deferred message and activate
-        if (t.deferredMessage) {
-          try { sendMessage(t.win, `[You are agent in kitty window ${t.win}. Use chat() to report progress, results, or issues — don't wait to be checked on.] ${t.deferredMessage}`); } catch { }
-          delete t.deferredMessage;
-        }
+        // All deps done — activate. Agent's wait_for_task() will pick it up.
         t.status = 'pending';
         unblocked.push(t);
       }
@@ -84,14 +87,39 @@ function now() {
 }
 
 function requireManager() {
-  const callerWin = process.env.AGENT_WIN ? parseInt(process.env.AGENT_WIN) : null;
+  if (!ME) return 'Cannot identify caller — $AGENT_WIN not set.';
   const state = loadState();
-  if (!callerWin) return 'Cannot identify caller — $AGENT_WIN not set.';
-  if (state.manager_win !== callerWin) return `Only the manager (win ${state.manager_win ?? 'unregistered'}) can do this. You are win ${callerWin}.`;
+  if (state.manager_win !== ME) return `Only the manager (win ${state.manager_win ?? 'unregistered'}) can do this. You are win ${ME}.`;
   return null;
 }
 
-// ---- Agent window helpers ----
+// Resolve agent identifier — accepts number (kitty win ID) or string (agent name)
+function resolveAgent(val) {
+  if (typeof val === 'number') return val;
+  if (typeof val === 'string' && /^\d+$/.test(val)) return parseInt(val);
+  return val; // string agent name (e.g. "todd")
+}
+
+// ---- Message helpers ----
+
+function postMessage(state, to, from, text) {
+  if (!state.messages) state.messages = [];
+  state.messages.push({ to, from, text, timestamp: now(), read: false });
+}
+
+function getUnread(state, agent) {
+  if (!state.messages) return [];
+  return state.messages.filter(m => m.to === agent && !m.read);
+}
+
+function markRead(state, agent) {
+  if (!state.messages) return;
+  for (const m of state.messages) {
+    if (m.to === agent && !m.read) m.read = true;
+  }
+}
+
+// ---- Kitty helpers (escape hatch only) ----
 
 function readWindow(win) {
   try {
@@ -105,9 +133,6 @@ function readWindow(win) {
 function isIdle(output) {
   const lines = output.split('\n').filter(l => l.trim());
   if (!lines.length) return false;
-  // Claude Code UI chrome appears after the prompt — skip it all
-  // Horizontal rules (─), status bar (? for shortcuts, esc to interrupt, etc.)
-  // "esc to interrupt" means agent is actively working — not idle
   if (lines.some(l => /esc to interrupt/.test(l))) return false;
   const chromePattern = /^[\s─━═\-]+$|^\s*(\?|esc |[0-9]+ bash|\u2193|Context left|Tip:)/;
   const filtered = lines.filter(l => !chromePattern.test(l));
@@ -120,59 +145,10 @@ function windowTail(output, n = 40) {
   return output.split('\n').slice(-n).join('\n');
 }
 
-function sendEnter(win) {
-  const sock = execSync(`ls -t /tmp/kitty-sock-* 2>/dev/null | head -1`, { encoding: 'utf8' }).trim();
-  if (sock) execSync(`kitty @ --to "unix:${sock}" send-key --match id:${win} enter`, { timeout: 5000 });
-}
-
-function hasUnsubmittedText(output) {
-  // Detect text sitting at the ❯ prompt without having been submitted.
-  const lines = output.split('\n').filter(l => l.trim());
-  const chromePattern = /^[\s─━═\-]+$|^\s*(\?|esc |[0-9]+ bash|\u2193|Context left|Tip:|ctrl\+)/;
-  const filtered = lines.filter(l => !chromePattern.test(l));
-  if (!filtered.length) return false;
-
-  // Check for pasted-text indicator (long messages get collapsed)
-  if (filtered.some(l => /\[Pasted text.*\+\d+ lines?\]/.test(l))) return true;
-
-  // Check any recent line for ❯ with text (handles wrapped long messages
-  // where the ❯ line is above the last visible line)
-  const tail = filtered.slice(-10);
-  const hasPromptWithText = tail.some(l => /^[❯>]\s+\S/.test(l));
-  if (!hasPromptWithText) return false;
-
-  // Exclude UI messages at the prompt
-  const last = filtered[filtered.length - 1];
-  if (/Press up to edit|queued messages/.test(last)) return false;
-
-  return true;
-}
-
-function sendMessage(win, message) {
-  // agent-ask accepts win + message; use shell so message can contain special chars
-  const escaped = message.replace(/'/g, `'\\''`);
-  execSync(`${BIN}/agent-ask ${win} '${escaped}'`, { timeout: 15000 });
-
-  // Safety net: agent-ask sends text+enter back-to-back (no sleep between),
-  // but verify it went through. If text is still at the prompt, retry enter.
-  for (let attempt = 0; attempt < 3; attempt++) {
-    execSync(`sleep ${0.5 + attempt * 0.3}`);
-    const result = readWindow(win);
-    if (!result.ok || !hasUnsubmittedText(result.text)) return; // went through
-    sendEnter(win);
-  }
-  // Final check
-  execSync('sleep 0.5');
-  const final = readWindow(win);
-  if (final.ok && hasUnsubmittedText(final.text)) {
-    throw new Error(`Message sent to win ${win} but enter failed after 3 retries — text sitting at prompt`);
-  }
-}
-
 // ---- MCP server ----
 
 const server = new Server(
-  { name: 'agent-manager', version: '1.0.0' },
+  { name: 'agent-manager', version: '2.0.0' },
   { capabilities: { tools: {} } }
 );
 
@@ -180,61 +156,69 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
       name: 'delegate',
-      description: 'Send a task to an agent window and record it in persistent state. Returns task ID.',
+      description: 'Assign a task to an agent. The agent receives it via wait_for_task(). Manager only.',
       inputSchema: {
         type: 'object',
         properties: {
-          win: { type: 'number', description: 'Kitty window ID' },
-          description: { type: 'string', description: 'Short human-readable description of the task (5-10 words)' },
-          message: { type: 'string', description: 'Full message to send to the agent' },
-          after: { description: 'Task ID or array of task IDs that must complete before this task starts. Message is deferred until all dependencies are done.', oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }] },
+          agent: { type: ['number', 'string'], description: 'Agent identifier — kitty window ID (number) or agent name (string, e.g. "todd")' },
+          description: { type: 'string', description: 'Short human-readable description (5-10 words)' },
+          message: { type: 'string', description: 'Full task message for the agent' },
+          after: { description: 'Task ID or array of IDs — deferred until all complete.', oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }] },
         },
-        required: ['win', 'description', 'message'],
+        required: ['agent', 'description', 'message'],
       },
     },
     {
-      name: 'wait_for_idle',
-      description: 'Block until the agent in window WIN hits an idle prompt (❯), then return the window tail. Polls every INTERVAL seconds.',
+      name: 'chat',
+      description: 'Send a message to another agent (or the manager if "to" is omitted). Delivered via shared state — the recipient sees it on their next wait_for_task() or wait_for_any() call.',
       inputSchema: {
         type: 'object',
         properties: {
-          win: { type: 'number', description: 'Kitty window ID' },
-          timeout: { type: 'number', description: 'Max seconds to wait (default 1800)' },
-          interval: { type: 'number', description: 'Poll interval in seconds (default 60)' },
+          to: { description: 'Recipient agent ID or name. Omit to send to the manager.' },
+          message: { type: 'string', description: 'Message to send' },
         },
-        required: ['win'],
+        required: ['message'],
+      },
+    },
+    {
+      name: 'wait_for_task',
+      description: 'Block until a task or message arrives for this agent. Call this when idle. Returns the task message or chat messages.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          timeout: { type: 'number', description: 'Max seconds to wait (default 600)' },
+        },
       },
     },
     {
       name: 'wait_for_any',
-      description: 'Block until ANY pending/in-progress agent goes idle. Returns which window went idle and its tail. Use this instead of wait_for_idle when managing multiple agents.',
+      description: 'Block until any agent reports (chat message to manager, task completion, or status change). Manager use.',
       inputSchema: {
         type: 'object',
         properties: {
-          timeout: { type: 'number', description: 'Max seconds to wait (default 1800)' },
-          interval: { type: 'number', description: 'Poll interval in seconds (default 60)' },
+          timeout: { type: 'number', description: 'Max seconds to wait (default 600)' },
+          interval: { type: 'number', description: 'Poll interval in seconds (default 15)' },
         },
       },
     },
     {
       name: 'task_list',
-      description: 'List all active (non-done) delegated tasks. Call at session start to see what is pending.',
+      description: 'List all active (non-done) tasks with status. Call at session start.',
       inputSchema: { type: 'object', properties: {} },
     },
     {
       name: 'task_done',
-      description: 'Mark the active task for a window as done.',
+      description: 'Mark a task done. Call with no args to mark your own task done, or specify agent to mark another (manager only).',
       inputSchema: {
         type: 'object',
         properties: {
-          win: { type: 'number', description: 'Kitty window ID' },
+          agent: { type: ['number', 'string'], description: 'Agent identifier. Omit to mark own task done.' },
         },
-        required: ['win'],
       },
     },
     {
       name: 'task_check',
-      description: 'Snapshot the current state of an agent window. Updates task status if idle.',
+      description: 'Read an agent\'s kitty terminal window (escape hatch for when agent is unresponsive). Returns window tail and status.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -245,28 +229,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'my_task',
-      description: 'Show what task is assigned to this window. Uses $AGENT_WIN to identify the calling agent. Returns task description, status, age, and any dependency info.',
+      description: 'Show what task is assigned to this agent. Uses $AGENT_WIN to identify caller.',
       inputSchema: { type: 'object', properties: {} },
     },
     {
-      name: 'chat',
-      description: 'Send a message to another agent. If win is omitted, sends to the manager. Workers: use this to report results, ask questions, or flag issues without waiting to be checked on.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          win: { type: 'number', description: 'Kitty window ID. Omit to send to the manager.' },
-          message: { type: 'string', description: 'Message to send' },
-        },
-        required: ['message'],
-      },
-    },
-    {
       name: 'register_manager',
-      description: 'Register the calling session as the manager. Window ID is auto-detected from $AGENT_WIN (set by the claude alias). The keepalive watcher kicks the manager (not workers) when there is pending work, idle agents, or cluster jobs.',
-      inputSchema: {
-        type: 'object',
-        properties: {},
-      },
+      description: 'Register as manager. Auto-detects window from $AGENT_WIN. Starts keepalive watcher.',
+      inputSchema: { type: 'object', properties: {} },
     },
   ],
 }));
@@ -278,149 +247,180 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   if (name === 'delegate') {
     const guard = requireManager();
     if (guard) return { content: [{ type: 'text', text: guard }], isError: true };
-    const { win, description, message } = args;
+    const agent = resolveAgent(args.agent);
+    const { description, message } = args;
     const afterRaw = args.after;
     const blockedBy = afterRaw ? (Array.isArray(afterRaw) ? afterRaw : [afterRaw]) : [];
 
     const state = loadState();
 
-    // Check if blocked by unfinished tasks
     const blocked = blockedBy.length > 0 && blockedBy.some(depId => {
       const dep = getTaskById(state, depId);
       return dep && dep.status !== 'done';
     });
 
-    if (!blocked) {
-      // Send immediately, prefixed with window identity
-      try {
-        sendMessage(win, `[You are agent in kitty window ${win}. Use chat() to report progress, results, or issues — don't wait to be checked on.] ${message}`);
-      } catch (e) {
-        return { content: [{ type: 'text', text: `Failed to send message to win ${win}: ${e.message}` }], isError: true };
-      }
-    }
-
-    // Replace any existing non-done task for this window
-    state.tasks = state.tasks.filter(t => !(t.win === win && t.status !== 'done'));
-    const taskId = `w${win}-${Date.now().toString(36)}`;
+    // Replace any existing non-done task for this agent
+    state.tasks = state.tasks.filter(t => !(t.agent === agent && t.status !== 'done'));
+    const taskId = `${typeof agent === 'string' ? agent : 'w' + agent}-${Date.now().toString(36)}`;
     const task = {
       id: taskId,
-      win,
+      agent,
+      // Keep 'win' as alias for backward compat with task_check
+      ...(typeof agent === 'number' ? { win: agent } : {}),
       description,
+      message,
       delegated_at: now(),
       status: blocked ? 'blocked' : 'pending',
       last_checked: now(),
     };
     if (blocked) {
       task.blockedBy = blockedBy;
-      task.deferredMessage = message;
     } else if (blockedBy.length > 0) {
-      task.blockedBy = blockedBy; // record deps even if already done
+      task.blockedBy = blockedBy;
     }
     state.tasks.push(task);
     saveState(state);
 
     const pendingCount = state.tasks.filter(t => t.status === 'pending').length;
     const blockedCount = state.tasks.filter(t => t.status === 'blocked').length;
-    const idleWins = state.tasks.filter(t => t.status === 'idle').map(t => t.win);
+    const idleAgents = state.tasks.filter(t => t.status === 'idle').map(t => t.agent);
     let nudge = `${pendingCount} pending`;
     if (blockedCount > 0) nudge += `, ${blockedCount} blocked`;
     nudge += '.';
-    if (idleWins.length > 0) nudge += ` Idle agents available: win ${idleWins.join(', ')}. Any tasks for them?`;
+    if (idleAgents.length > 0) nudge += ` Idle agents: ${idleAgents.join(', ')}. Any tasks for them?`;
     if (pendingCount > 0) nudge += ' Call wait_for_any() to monitor.';
     const statusMsg = blocked ? `Queued (blocked by ${blockedBy.join(', ')})` : 'Delegated';
     return {
       content: [{
         type: 'text',
-        text: `${statusMsg} to win ${win} [${taskId}]: ${description}\n${nudge}`,
+        text: `${statusMsg} to ${agent} [${taskId}]: ${description}\n${nudge}`,
       }],
     };
   }
 
-  // ---- wait_for_idle ----
-  if (name === 'wait_for_idle') {
-    const win = args.win;
-    const timeoutMs = (args.timeout ?? 1800) * 1000;
-    const intervalMs = (args.interval ?? 60) * 1000;
+  // ---- chat ----
+  if (name === 'chat') {
+    const { message } = args;
+    let to = args.to != null ? resolveAgent(args.to) : null;
+    if (to == null) {
+      const state = loadState();
+      to = state.manager_win;
+      if (!to) return { content: [{ type: 'text', text: 'No recipient specified and no manager registered.' }], isError: true };
+    }
+    const from = ME || 'unknown';
+    const state = loadState();
+    postMessage(state, to, from, message);
+    saveState(state);
+
+    let warning = '';
+    if (ME && state.manager_win === ME && message.length > 200) {
+      warning = '\n\n⚠ Long message (>200 chars). If assigning work, use delegate() instead.';
+    }
+
+    return { content: [{ type: 'text', text: `Message queued for ${to}.${warning}` }] };
+  }
+
+  // ---- wait_for_task ----
+  if (name === 'wait_for_task') {
+    if (!ME) return { content: [{ type: 'text', text: '$AGENT_WIN not set.' }], isError: true };
+    const timeoutMs = Math.min(args.timeout ?? 600, 600) * 1000;
+    const intervalMs = 5000; // poll every 5s — state file is local, cheap to read
     const deadline = Date.now() + timeoutMs;
 
-    // Check immediately first
-    let result = readWindow(win);
-    if (!result.ok) {
-      return { content: [{ type: 'text', text: `Cannot read win ${win}: ${result.error}` }], isError: true };
-    }
-    if (isIdle(result.text)) {
-      const state = loadState();
-      const task = getTask(state, win);
-      if (task) { task.status = 'idle'; task.last_checked = now(); saveState(state); }
-      return { content: [{ type: 'text', text: `win ${win} already idle:\n${windowTail(result.text)}` }] };
-    }
-
-    // Poll loop
     while (Date.now() < deadline) {
-      const wait = Math.min(intervalMs, deadline - Date.now());
-      await new Promise(r => setTimeout(r, wait));
-      result = readWindow(win);
-      if (!result.ok) continue; // transient read failure, keep polling
-      if (isIdle(result.text)) {
-        const state = loadState();
-        const task = getTask(state, win);
-        if (task) { task.status = 'idle'; task.last_checked = now(); saveState(state); }
-        return { content: [{ type: 'text', text: `win ${win} idle:\n${windowTail(result.text)}` }] };
-      }
-      // Update last_checked even while still working
       const state = loadState();
-      const task = getTask(state, win);
-      if (task) { task.last_checked = now(); saveState(state); }
+
+      // Check for unread messages first
+      const unread = getUnread(state, ME);
+      if (unread.length > 0) {
+        markRead(state, ME);
+        saveState(state);
+        const formatted = unread.map(m => `[from ${m.from}] ${m.text}`).join('\n\n');
+        return { content: [{ type: 'text', text: `Messages received:\n\n${formatted}` }] };
+      }
+
+      // Check for a pending task assigned to me
+      const task = state.tasks.find(t => t.agent === ME && t.status === 'pending' && !t.acknowledged);
+      if (task) {
+        task.acknowledged = true;
+        task.status = 'working';
+        task.last_checked = now();
+        saveState(state);
+        return {
+          content: [{
+            type: 'text',
+            text: `Task assigned [${task.id}]: ${task.description}\n\n${task.message}\n\nUse chat() to report progress, results, or issues. Call task_done() or chat() when finished.`,
+          }],
+        };
+      }
+
+      await new Promise(r => setTimeout(r, intervalMs));
     }
 
-    return { content: [{ type: 'text', text: `Timeout waiting for win ${win} to go idle.` }], isError: true };
+    return { content: [{ type: 'text', text: 'No task or message received (timeout). Call wait_for_task() again to keep waiting.' }] };
   }
 
   // ---- wait_for_any ----
   if (name === 'wait_for_any') {
-    const maxTimeout = 600; // 10 min cap — don't let manager zone out in a wait loop
-    const timeoutMs = Math.min(args.timeout ?? 600, maxTimeout) * 1000;
-    const intervalMs = Math.min(args.interval ?? 60, 120) * 1000; // cap interval at 2 min
+    const timeoutMs = Math.min(args.timeout ?? 600, 600) * 1000;
+    const intervalMs = Math.min(args.interval ?? 15, 120) * 1000;
     const deadline = Date.now() + timeoutMs;
+
+    // Snapshot what we've already seen so we only report new things
+    let lastState = loadState();
+    const seenMessageCount = (lastState.messages || []).filter(m => m.to === ME).length;
 
     while (Date.now() < deadline) {
       const state = loadState();
-      const pending = state.tasks.filter(t => t.status === 'pending');
-      const blocked = state.tasks.filter(t => t.status === 'blocked');
-      if (!pending.length) {
-        const blockedMsg = blocked.length > 0 ? ` (${blocked.length} blocked — waiting on dependencies)` : '';
-        return { content: [{ type: 'text', text: `No pending tasks to watch.${blockedMsg}` }] };
+
+      // Check for new messages to manager
+      const myMessages = (state.messages || []).filter(m => m.to === ME);
+      if (myMessages.length > seenMessageCount) {
+        const newMsgs = myMessages.slice(seenMessageCount);
+        // Mark them read
+        for (const m of newMsgs) m.read = true;
+        saveState(state);
+        const formatted = newMsgs.map(m => `[from ${m.from}] ${m.text}`).join('\n\n');
+        const pending = state.tasks.filter(t => t.status === 'pending' || t.status === 'working').length;
+        const next = pending > 0
+          ? `\n\n${pending} task(s) still active. Call wait_for_any() again.`
+          : '\n\nNo active tasks.';
+        return {
+          content: [{
+            type: 'text',
+            text: `Incoming message(s):\n\n${formatted}${next}`,
+          }],
+        };
       }
 
-      for (const task of pending) {
-        const result = readWindow(task.win);
-        if (!result.ok) continue; // transient read failure, skip this window
-        if (isIdle(result.text)) {
-          task.status = 'idle';
-          task.last_checked = now();
-          saveState(state);
-          const remaining = state.tasks.filter(t => t.status === 'pending').length;
-          const next = remaining > 0
-            ? `\n\n${remaining} task(s) still pending. Review this output: what follow-up tasks does it suggest? Delegate them now. Then call wait_for_any() again.`
-            : '\n\nNo other pending tasks. Review this output: what follow-up tasks does it suggest? What gaps remain? If nothing obvious, look around — check project scratch files, TODOs, open questions, recent discussion. Try to find useful work before going idle. Only report to user if genuinely nothing remains.';
-          return {
-            content: [{
-              type: 'text',
-              text: `win ${task.win} idle [${task.id}: ${task.description}]:\n${windowTail(result.text)}${next}`,
-            }],
-          };
-        }
+      // Check for tasks that became idle (agent marked themselves done via state)
+      const nowIdle = state.tasks.filter(t => t.status === 'idle');
+      const wasIdle = lastState.tasks.filter(t => t.status === 'idle').map(t => t.id);
+      const newlyIdle = nowIdle.filter(t => !wasIdle.includes(t.id));
+      if (newlyIdle.length > 0) {
+        const t = newlyIdle[0];
+        const remaining = state.tasks.filter(tt => tt.status === 'pending' || tt.status === 'working').length;
+        const next = remaining > 0
+          ? `\n\n${remaining} task(s) still active. Call wait_for_any() again.`
+          : '\n\nNo other active tasks.';
+        return {
+          content: [{
+            type: 'text',
+            text: `Agent ${t.agent} idle [${t.id}: ${t.description}]${next}`,
+          }],
+        };
       }
 
-      // Update last_checked for all pending
-      for (const task of pending) { task.last_checked = now(); }
-      saveState(state);
+      // Check for blocked tasks that got unblocked
+      const pendingNoAck = state.tasks.filter(t => t.status === 'pending' && !t.acknowledged);
+      // These will be picked up by the agent's wait_for_task — nothing to report yet
 
+      lastState = state;
       const wait = Math.min(intervalMs, deadline - Date.now());
       await new Promise(r => setTimeout(r, wait));
     }
 
-    return { content: [{ type: 'text', text: 'Timeout waiting for any agent to go idle.' }], isError: true };
+    return { content: [{ type: 'text', text: 'Timeout. Call wait_for_any() again to keep monitoring.' }], isError: true };
   }
 
   // ---- task_list ----
@@ -428,22 +428,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const state = loadState();
     const active = state.tasks.filter(t => t.status !== 'done');
     if (!active.length) {
-
-      return { content: [{ type: 'text', text: 'No active delegated tasks.' }] };
+      return { content: [{ type: 'text', text: 'No active tasks.' }] };
     }
-    // Refresh status from actual window state
-    let changed = false;
-    for (const t of active) {
-      if (t.status === 'pending') {
-        const result = readWindow(t.win);
-        if (result.ok && isIdle(result.text)) {
-          t.status = 'idle';
-          t.last_checked = now();
-          changed = true;
-        }
-      }
-    }
-    if (changed) saveState(state);
 
     const lines = active.map(t => {
       const age = Math.round((Date.now() - new Date(t.delegated_at)) / 60000);
@@ -451,52 +437,65 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (t.status === 'blocked' && t.blockedBy) {
         status = `blocked by ${t.blockedBy.join(', ')}`;
       }
-      if (t.status === 'pending' && age > 1440) {
-        status = `pending [stale — ${Math.round(age / 60)}h, check window]`;
+      if ((t.status === 'pending' || t.status === 'working') && age > 1440) {
+        status += ` [stale — ${Math.round(age / 60)}h]`;
       }
-      return `[${t.id}] win ${t.win} | ${status} | ${t.description} | ${age}m ago`;
+      return `[${t.id}] ${t.agent} | ${status} | ${t.description} | ${age}m ago`;
     });
+
+    const working = active.filter(t => t.status === 'working');
     const pending = active.filter(t => t.status === 'pending');
     const idle = active.filter(t => t.status === 'idle');
     const blocked = active.filter(t => t.status === 'blocked');
+
+    // Check for unread messages
+    const unread = ME ? getUnread(state, ME) : [];
+
     let nudge = '';
-    if (idle.length > 0) nudge = `\n\n${idle.length} idle — review their output. What follow-up tasks does it suggest? Delegate or mark done.`;
-    if (pending.length > 0) nudge += `${nudge ? ' ' : '\n\n'}${pending.length} pending — call wait_for_any() to monitor.`;
-    if (blocked.length > 0) nudge += ` ${blocked.length} blocked — waiting on dependencies.`;
-    if (idle.length > 0 && pending.length === 0 && blocked.length === 0) nudge += ' Are there additional tasks to delegate?';
+    if (unread.length > 0) nudge += `\n\n📬 ${unread.length} unread message(s). Check them.`;
+    if (idle.length > 0) nudge += `\n\n${idle.length} idle — review and delegate or mark done.`;
+    if (working.length > 0) nudge += `\n\n${working.length} working — call wait_for_any() to monitor.`;
+    if (pending.length > 0) nudge += ` ${pending.length} pending (awaiting agent pickup).`;
+    if (blocked.length > 0) nudge += ` ${blocked.length} blocked.`;
     return { content: [{ type: 'text', text: lines.join('\n') + nudge }] };
   }
 
   // ---- task_done ----
   if (name === 'task_done') {
-    const guard = requireManager();
-    if (guard) return { content: [{ type: 'text', text: guard }], isError: true };
+    // Either the manager marks an agent done, or an agent marks itself done
+    const agent = args.agent ? resolveAgent(args.agent) : ME;
+    if (!agent) return { content: [{ type: 'text', text: 'No agent specified and $AGENT_WIN not set.' }], isError: true };
+
+    // If calling for another agent, must be manager
+    if (agent !== ME) {
+      const guard = requireManager();
+      if (guard) return { content: [{ type: 'text', text: guard }], isError: true };
+    }
+
     const state = loadState();
-    const task = getTask(state, args.win);
+    const task = getTask(state, agent);
     if (!task) {
-      return { content: [{ type: 'text', text: `No active task for win ${args.win}.` }] };
+      return { content: [{ type: 'text', text: `No active task for ${agent}.` }] };
     }
     task.status = 'done';
     task.completed_at = now();
-    // Auto-unblock dependents
     const unblocked = unblockDependents(state, task.id);
     saveState(state);
-    const remaining = state.tasks.filter(t => t.status === 'pending' || t.status === 'idle').length;
-    const blockedRemaining = state.tasks.filter(t => t.status === 'blocked').length;
-    let msg = `Marked win ${args.win} task done: ${task.description}.`;
+
+    const remaining = state.tasks.filter(t => t.status !== 'done').length;
+    let msg = `Marked ${agent} task done: ${task.description}.`;
     if (unblocked.length > 0) {
-      msg += `\nUnblocked ${unblocked.length} task(s): ${unblocked.map(t => `[${t.id}] win ${t.win}: ${t.description}`).join('; ')}`;
+      msg += `\nUnblocked: ${unblocked.map(t => `[${t.id}] ${t.agent}: ${t.description}`).join('; ')}`;
     }
-    const active = remaining + blockedRemaining;
-    if (active > 0) {
-      msg += ` ${remaining} pending, ${blockedRemaining} blocked — review idle agents or call wait_for_any().`;
+    if (remaining > 0) {
+      msg += ` ${remaining} task(s) remaining.`;
     } else {
-      msg += ' All tasks complete. What does the completed work enable? What gaps remain? Look around — check scratch files, TODOs, open questions, recent discussion, project state. Find useful work before going idle. Only report to user if genuinely nothing remains.';
+      msg += ' All tasks complete.';
     }
     return { content: [{ type: 'text', text: msg }] };
   }
 
-  // ---- task_check ----
+  // ---- task_check (kitty escape hatch) ----
   if (name === 'task_check') {
     const win = args.win;
     const result = readWindow(win);
@@ -506,9 +505,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const idle = isIdle(result.text);
 
     const state = loadState();
-    const task = getTask(state, win);
+    const task = state.tasks.find(t => (t.win === win || t.agent === win) && t.status !== 'done');
     if (task) {
-      if (idle) task.status = 'idle';
+      if (idle && task.status === 'working') task.status = 'idle';
       task.last_checked = now();
       saveState(state);
     }
@@ -517,108 +516,64 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     let taskStr = ' [no recorded task]';
     if (task) {
       const age = Math.round((Date.now() - new Date(task.delegated_at)) / 60000);
-      let depInfo = '';
-      if (task.blockedBy && task.blockedBy.length > 0) {
-        depInfo = ` (blocked by ${task.blockedBy.join(', ')})`;
-      }
-      taskStr = ` [${task.id}: ${task.description} | ${age}m ago${depInfo}]`;
-    }
-
-    // Nudge about other agents to fight tunnel vision
-    const others = state.tasks.filter(t => t.status !== 'done' && t.win !== win);
-    const otherIdle = others.filter(t => t.status === 'idle');
-    const otherStale = others.filter(t => t.status === 'pending' && (Date.now() - new Date(t.last_checked)) > 600000);
-    let nudge = '';
-    if (otherIdle.length > 0) {
-      nudge += `\n\n⚠ ${otherIdle.length} other agent(s) idle: ${otherIdle.map(t => `win ${t.win} (${t.description})`).join(', ')}. Check on them before diving deeper here.`;
-    }
-    if (otherStale.length > 0) {
-      nudge += `\n\n⚠ ${otherStale.length} agent(s) not checked in 10+ min: ${otherStale.map(t => `win ${t.win} (${t.description})`).join(', ')}.`;
+      taskStr = ` [${task.id}: ${task.description} | ${age}m ago]`;
     }
 
     return {
       content: [{
         type: 'text',
-        text: `win ${win} ${statusStr}${taskStr}:\n${windowTail(result.text)}${nudge}`,
+        text: `win ${win} ${statusStr}${taskStr}:\n${windowTail(result.text)}`,
       }],
     };
   }
 
   // ---- my_task ----
   if (name === 'my_task') {
-    const win = process.env.AGENT_WIN ? parseInt(process.env.AGENT_WIN) : null;
-    if (!win) {
-      return { content: [{ type: 'text', text: '$AGENT_WIN not set. Launch claude with the alias.' }], isError: true };
-    }
+    if (!ME) return { content: [{ type: 'text', text: '$AGENT_WIN not set.' }], isError: true };
     const state = loadState();
-    const task = getTask(state, win);
-    if (!task) {
-      return { content: [{ type: 'text', text: `No active task assigned to win ${win}.` }] };
-    }
-    const age = Math.round((Date.now() - new Date(task.delegated_at)) / 60000);
-    let depInfo = '';
-    if (task.blockedBy && task.blockedBy.length > 0) {
-      const depDetails = task.blockedBy.map(id => {
-        const dep = getTaskById(state, id);
-        return dep ? `${id} (${dep.description} — ${dep.status})` : `${id} (unknown)`;
-      });
-      depInfo = `\nBlocked by: ${depDetails.join(', ')}`;
-    }
-    const others = state.tasks.filter(t => t.status !== 'done' && t.win !== win);
-    let othersInfo = '';
-    if (others.length > 0) {
-      othersInfo = '\n\nOther active tasks:\n' + others.map(t => `  win ${t.win} | ${t.status} | ${t.description}`).join('\n');
-    }
-    return { content: [{ type: 'text', text: `Your task [${task.id}]: ${task.description}\nStatus: ${task.status} | ${age}m ago${depInfo}${othersInfo}\n\nReminder: Use chat() to report progress, results, issues, or questions — don't wait to be checked on.` }] };
-  }
+    const task = getTask(state, ME);
+    const unread = getUnread(state, ME);
 
-  // ---- chat ----
-  if (name === 'chat') {
-    const { message } = args;
-    const callerWin = process.env.AGENT_WIN ? parseInt(process.env.AGENT_WIN) : null;
-    let win = args.win;
-    if (!win) {
-      const state = loadState();
-      win = state.manager_win;
-      if (!win) return { content: [{ type: 'text', text: 'No win specified and no manager registered.' }], isError: true };
-    }
-    const prefix = callerWin ? `[win ${callerWin}] ` : '';
-    try {
-      sendMessage(win, `${prefix}${message}`);
-    } catch (e) {
-      return { content: [{ type: 'text', text: `Failed to send to win ${win}: ${e.message}` }], isError: true };
+    let text = '';
+    if (task) {
+      const age = Math.round((Date.now() - new Date(task.delegated_at)) / 60000);
+      let depInfo = '';
+      if (task.blockedBy && task.blockedBy.length > 0) {
+        const depDetails = task.blockedBy.map(id => {
+          const dep = getTaskById(state, id);
+          return dep ? `${id} (${dep.description} — ${dep.status})` : `${id} (unknown)`;
+        });
+        depInfo = `\nBlocked by: ${depDetails.join(', ')}`;
+      }
+      text = `Your task [${task.id}]: ${task.description}\nStatus: ${task.status} | ${age}m ago${depInfo}`;
+    } else {
+      text = `No active task for win ${ME}.`;
     }
 
-    // Warn manager if chat() looks like it should be delegate()
-    const state = loadState();
-    let warning = '';
-    if (callerWin && state.manager_win === callerWin && message.length > 200) {
-      warning = '\n\n⚠ This message is long (>200 chars). If you\'re assigning work, use delegate() instead — chat() bypasses task tracking, so keepalive and task_list won\'t know about it.';
+    if (unread.length > 0) {
+      text += `\n\n📬 ${unread.length} unread message(s). Call wait_for_task() to read them.`;
     }
 
-    return { content: [{ type: 'text', text: `Sent to win ${win}.${warning}` }] };
+    return { content: [{ type: 'text', text }] };
   }
 
   // ---- register_manager ----
   if (name === 'register_manager') {
-    const win = process.env.AGENT_WIN ? parseInt(process.env.AGENT_WIN) : null;
-    if (!win) {
-      return { content: [{ type: 'text', text: '$AGENT_WIN not set. Launch claude with the alias (which sets AGENT_WIN=$KITTY_WINDOW_ID automatically).' }], isError: true };
+    if (!ME) {
+      return { content: [{ type: 'text', text: '$AGENT_WIN not set. Launch claude with the alias.' }], isError: true };
     }
     const state = loadState();
-    state.manager_win = win;
+    state.manager_win = ME;
     saveState(state);
 
     // Start keepalive if not already running
     try {
-      const existing = execSync(`pgrep -f ${BIN}/agent-keepalive`, { encoding: 'utf8', timeout: 5000 }).trim();
-      // already running
+      execSync(`pgrep -f ${BIN}/agent-keepalive`, { encoding: 'utf8', timeout: 5000 });
     } catch {
-      // not running — start it
       exec(`${BIN}/agent-keepalive`, { detached: true, stdio: 'ignore' }).unref();
     }
 
-    return { content: [{ type: 'text', text: `Registered win ${win} as manager. Keepalive watcher running.\n\nRead ~/.claude/reference/managing-agents.md before proceeding.` }] };
+    return { content: [{ type: 'text', text: `Registered win ${ME} as manager. Keepalive watcher running.\n\nRead ~/.claude/reference/managing-agents.md before proceeding.` }] };
   }
 
   return { content: [{ type: 'text', text: `Unknown tool: ${name}` }], isError: true };
