@@ -532,7 +532,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     if (blockedCount > 0) nudge += `, ${blockedCount} blocked`;
     nudge += '.';
     const statusMsg = blocked ? `Queued (blocked by ${blockedBy.join(', ')})` : 'Delegated';
-    const kickMsg = kicked ? ' (kicked)' : (!blocked && getAgent(state, agent) ? ' (no kitty window — agent must poll)' : '');
+    const agentRegistered = !!getAgent(state, agent);
+    const kickMsg = kicked ? ' (kicked)' : !blocked && !agentRegistered ? ' ⚠ agent not registered — task created but no way to notify' : (!blocked && agentRegistered ? ' (no kitty window — agent must poll)' : '');
     return {
       content: [{
         type: 'text',
@@ -566,7 +567,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       warning = '\n\n⚠ Long message (>200 chars). If assigning work, use delegate() instead.';
     }
 
-    const kickMsg = kicked ? ' (kicked)' : '';
+    const toRegistered = !!getAgent(state, to);
+    const kickMsg = kicked ? ' (kicked)' : !toRegistered ? ' ⚠ recipient not registered — message saved but no way to notify' : '';
     return { content: [{ type: 'text', text: `Message queued for ${to}${kickMsg}.${warning}` }] };
   }
 
@@ -891,7 +893,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       return { content: [{ type: 'text', text: `Failed to spawn: ${e.message}` }], isError: true };
     }
 
-    return { content: [{ type: 'text', text: `Spawned new agent in win ${targetWin} (cwd: ${cwd}). It will register itself on startup. Use delegate(${targetWin}, ...) once it's registered.` }] };
+    // Kick after delay so the agent registers on startup
+    const kickWin = targetWin;
+    setTimeout(() => {
+      try { execSync(`${BIN}/agent-kick ${kickWin}`, { timeout: 10000 }); } catch {}
+    }, 15000);
+
+    return { content: [{ type: 'text', text: `Spawned new agent in win ${targetWin} (cwd: ${cwd}). Will kick in ~15s to trigger registration. Use delegate(${targetWin}, ...) once it's registered.` }] };
   }
 
   return { content: [{ type: 'text', text: `Unknown tool: ${name}` }], isError: true };
