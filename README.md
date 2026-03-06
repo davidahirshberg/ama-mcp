@@ -55,7 +55,6 @@ Add to your Claude Code MCP config (`~/.claude/settings.json`):
 | Tool | Description |
 |------|-------------|
 | `delegate(agent, description, message, after?, friendly_name?)` | Assign a tracked task + kick agent. |
-| `wait_for_any(timeout?, interval?)` | Block until any agent reports. |
 | `name_agent(agent, friendly_name)` | Set a friendly name for an agent (e.g. "sims guy"). |
 | `spawn(cwd?, win?)` | Launch a fresh claude agent in a new kitty tab. |
 | `respawn(agent, win?)` | Resume a dead agent session in an idle kitty tab. |
@@ -82,7 +81,7 @@ Task stays blocked until `w5-m1abc` is done, then activates and kicks the agent.
 
 ### Notifications (📬)
 
-Every kick sends `ESC` + `📬` + `Enter` to the agent's kitty window. The `ESC` interrupts blocking calls (`wait_for_any`, `wait_for_task`). The `📬` appears as user input — when the agent sees it, it calls `my_task()` to read actual messages from the state file. No message content ever goes through the terminal.
+Every kick sends `ESC` + `📬` + `Enter` to the agent's kitty window. The `ESC` interrupts blocking calls (`wait_for_task`). The `📬` appears as user input — when the agent sees it, it calls `my_task()` to read actual messages from the state file. No message content ever goes through the terminal.
 
 ### Keepalive watcher
 

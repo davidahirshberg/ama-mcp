@@ -11,7 +11,6 @@
  *   - delegate(agent, description, message)  assign task (manager only)
  *   - chat(message, to?)                 send message + kick recipient
  *   - wait_for_task(timeout?)            block until task/message arrives
- *   - wait_for_any(timeout?)             block until any agent reports
  *   - task_list()                        show active tasks + registered agents
  *   - task_done(agent?)                  mark task complete
  *   - task_check(win)                    read agent's kitty window (escape hatch)
@@ -275,17 +274,6 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
-      name: 'wait_for_any',
-      description: 'Block until any agent reports (chat message to manager, task completion, or status change). Manager use.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          timeout: { type: 'number', description: 'Max seconds to wait (default 600)' },
-          interval: { type: 'number', description: 'Poll interval in seconds (default 15)' },
-        },
-      },
-    },
-    {
       name: 'task_list',
       description: 'List all active (non-done) tasks and registered agents. Call at session start.',
       inputSchema: { type: 'object', properties: {} },
@@ -543,7 +531,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     let nudge = `${pendingCount} pending`;
     if (blockedCount > 0) nudge += `, ${blockedCount} blocked`;
     nudge += '.';
-    if (pendingCount > 0) nudge += ' Call wait_for_any() to monitor.';
     const statusMsg = blocked ? `Queued (blocked by ${blockedBy.join(', ')})` : 'Delegated';
     const kickMsg = kicked ? ' (kicked)' : (!blocked && getAgent(state, agent) ? ' (no kitty window — agent must poll)' : '');
     return {
@@ -623,81 +610,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     return { content: [{ type: 'text', text: 'No task or message received (timeout). Call wait_for_task() again to keep waiting.' }] };
   }
 
-  // ---- wait_for_any ----
-  if (name === 'wait_for_any') {
-    const timeoutMs = Math.min(args.timeout ?? 600, 600) * 1000;
-    const intervalMs = Math.min(args.interval ?? 15, 120) * 1000;
-    const deadline = Date.now() + timeoutMs;
-
-    let lastState = loadState();
-    const seenMessageCount = (lastState.messages || []).filter(m => m.to === ME).length;
-
-    while (Date.now() < deadline) {
-      const state = loadState();
-
-      // Check for new messages to manager
-      const myMessages = (state.messages || []).filter(m => m.to === ME);
-      if (myMessages.length > seenMessageCount) {
-        const newMsgs = myMessages.slice(seenMessageCount);
-        for (const m of newMsgs) m.read = true;
-        saveState(state);
-        const formatted = newMsgs.map(m => `[from ${m.from}] ${m.text}`).join('\n\n');
-        const pending = state.tasks.filter(t => t.status === 'pending' || t.status === 'working').length;
-        const next = pending > 0
-          ? `\n\n${pending} task(s) still active. Call wait_for_any() again.`
-          : '\n\nNo active tasks.';
-        return {
-          content: [{
-            type: 'text',
-            text: `Incoming message(s):\n\n${formatted}${next}`,
-          }],
-        };
-      }
-
-      // Check for tasks that became idle
-      const nowIdle = state.tasks.filter(t => t.status === 'idle');
-      const wasIdle = lastState.tasks.filter(t => t.status === 'idle').map(t => t.id);
-      const newlyIdle = nowIdle.filter(t => !wasIdle.includes(t.id));
-      if (newlyIdle.length > 0) {
-        const t = newlyIdle[0];
-        const remaining = state.tasks.filter(tt => tt.status === 'pending' || tt.status === 'working').length;
-        const next = remaining > 0
-          ? `\n\n${remaining} task(s) still active. Call wait_for_any() again.`
-          : '\n\nNo other active tasks.';
-        return {
-          content: [{
-            type: 'text',
-            text: `Agent ${t.agent} idle [${t.id}: ${t.description}]${next}`,
-          }],
-        };
-      }
-
-      // Check for newly done tasks
-      const nowDone = state.tasks.filter(t => t.status === 'done');
-      const wasDone = lastState.tasks.filter(t => t.status === 'done').map(t => t.id);
-      const newlyDone = nowDone.filter(t => !wasDone.includes(t.id));
-      if (newlyDone.length > 0) {
-        const t = newlyDone[0];
-        const remaining = state.tasks.filter(tt => tt.status !== 'done' && tt.status !== 'blocked').length;
-        const next = remaining > 0
-          ? `\n\n${remaining} task(s) still active. Call wait_for_any() again.`
-          : '\n\nNo other active tasks.';
-        return {
-          content: [{
-            type: 'text',
-            text: `Agent ${t.agent} completed [${t.id}: ${t.description}]${next}`,
-          }],
-        };
-      }
-
-      lastState = state;
-      const wait = Math.min(intervalMs, deadline - Date.now());
-      await new Promise(r => setTimeout(r, wait));
-    }
-
-    return { content: [{ type: 'text', text: 'Timeout. Call wait_for_any() again to keep monitoring.' }], isError: true };
-  }
-
   // ---- task_list ----
   if (name === 'task_list') {
     const state = loadState();
@@ -749,7 +661,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     let nudge = '';
     if (unread.length > 0) nudge += `\n\n📬 ${unread.length} unread message(s). Check them.`;
     if (idle.length > 0) nudge += `\n\n${idle.length} idle — review and delegate or mark done.`;
-    if (working.length > 0) nudge += `\n\n${working.length} working — call wait_for_any() to monitor.`;
+    if (working.length > 0) nudge += `\n\n${working.length} working.`;
     if (pending.length > 0) nudge += ` ${pending.length} pending (awaiting agent pickup).`;
     if (blocked.length > 0) nudge += ` ${blocked.length} blocked.`;
     return { content: [{ type: 'text', text: text + nudge }] };

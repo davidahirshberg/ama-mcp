@@ -61,7 +61,6 @@ With `agent-read` and `agent-kick` available, a meta session can actively interv
 - `delegate(agent, description, message, after?, friendly_name?)` — assign a task. Writes to state and kicks the agent via kitty. `agent` is a kitty window ID, agent name, or friendly name. Optional `after` for dependencies. Optional `friendly_name` to name the agent on first delegation.
 - `chat(message, to?)` — send a message. Writes to state and kicks the recipient via kitty. Omit `to` to send to the manager.
 - `wait_for_task(timeout?)` — block until a task or message arrives. Agents call this when idle. Polls every 5s.
-- `wait_for_any(timeout?, interval?)` — block until any agent sends a message or a task status changes. Manager use. Default timeout 600s.
 - `task_list()` — show all active tasks + registered agents. **Call at session start.** Shows friendly names when set.
 - `task_done(agent?)` — mark a task done. No args = mark own task. Marking another agent's task requires manager. Automatically unblocks dependent tasks and kicks them.
 - `task_check(win)` — **escape hatch.** Read an agent's kitty terminal directly. For stuck/unresponsive agents only.
@@ -157,7 +156,7 @@ Auto-started by `register_manager`. Kicks the manager (via kitty — the one rem
 
 **Redirect without explanation when an agent is stuck.** Give the right target and move on. At low context especially, every token costs working memory — be terse.
 
-**Keep working while monitoring.** `wait_for_any` blocks, so run it in parallel with other work. Between delegation and result, draft sections, write guidance, answer questions. Don't sit idle watching agents think.
+**Keep working while monitoring.** Between delegation and result, draft sections, write guidance, answer questions. Don't sit idle watching agents think. The keepalive and 📬 kicks handle notifications.
 
 **Report when there's something worth knowing.** Report: blockers needing decisions, significant findings, task completions. Don't report: "agent is thinking," routine progress on a task that's going fine.
 

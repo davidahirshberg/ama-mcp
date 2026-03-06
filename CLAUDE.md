@@ -37,10 +37,6 @@ Send a message to another agent's inbox. Writes to state and kicks the recipient
 
 Block until a task or message arrives for this agent. Polls the state file every 5s. Returns the task message or chat messages.
 
-### wait_for_any(timeout?, interval?)
-
-Block until any agent sends a message or a task status changes. Manager use. Default timeout 600s, interval 15s.
-
 ### task_list()
 
 List all active tasks and registered agents. Call at session start.
@@ -116,7 +112,7 @@ The state file (`~/.claude/agent-tasks.json`) is the source of truth. Kitty is t
 - `chat()` writes message → kicks recipient via kitty
 - `task_done()` with unblocked deps → kicks each unblocked agent
 
-**Kicks are 📬.** Every kick sends `ESC` (interrupts blocking calls like `wait_for_any`) then `📬` + Enter to the agent's kitty window. The 📬 appears as input text. No message content is sent through the terminal — the actual task or message lives in the state file.
+**Kicks are 📬.** Every kick sends `ESC` (interrupts blocking calls like `wait_for_task`) then `📬` + Enter to the agent's kitty window. The 📬 appears as input text. No message content is sent through the terminal — the actual task or message lives in the state file.
 
 **When you see 📬 as input, call `my_task()`.** This is the universal response. `my_task()` returns your current task and any unread messages.
 
