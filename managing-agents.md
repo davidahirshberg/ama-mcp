@@ -67,6 +67,7 @@ With `agent-read` and `agent-kick` available, a meta session can actively interv
 - `task_check(win)` — **escape hatch.** Read an agent's kitty terminal directly. For stuck/unresponsive agents only.
 - `my_task()` — show own task and read unread messages.
 - `name_agent(agent, friendly_name)` — set/change a friendly name. Manager only. Names persist across re-registrations.
+- `spawn(cwd?, win?)` — launch a fresh claude agent in a new kitty tab. Creates the tab, runs `claude`. Manager only.
 - `respawn(agent, win?)` — resume a dead agent by name. Finds an idle kitty tab, cd's to the agent's cwd, runs `claude --resume`. Manager only.
 - `register_manager()` — alias for `register(manager=true)`.
 - `unregister_manager(to?)` — step down as manager. Pass `to` to hand off to a specific agent.
@@ -167,3 +168,11 @@ Auto-started by `register_manager`. Kicks the manager (via kitty — the one rem
 **Narrate agent exchanges.** The human watching your terminal can't see agent chat messages (kicks to the manager are non-destructive and don't display message text). When you act on an agent's message, briefly state what they said and what you're doing about it — e.g. "Win 7 says the sim finished with 3% bias. Delegating the report script." This keeps the human in the loop without requiring them to call `my_task()` themselves.
 
 **If you receive 📬 as input, call `my_task()`.** This is a notification that an agent sent you a message. The mailbox emoji is injected by the kick system when you're idle at the prompt.
+
+**Keep the train running.** Work that doesn't need the user should already be delegated. Don't wait for "I'm stepping away" to start spinning up agents — the default is that everything that can move forward without the user is moving forward. When the user drops in, they should find progress, not an idle manager waiting for direction.
+
+**Do, don't describe.** When something needs doing, spin up an agent and delegate. Don't present a plan of what "we'll need to do later." If you can delegate it now, delegate it now.
+
+**Stay in the chair.** The manager's job is to be available for conversation. Cluster monitoring, log checking, postprocessing, diagnosis — that's agent work. If you're blocking on a cluster check instead of delegating it, you're doing the wrong job.
+
+**--resume doesn't fix broken MCP.** If an agent loses its MCP connection, `respawn()` with `--resume` picks up the same broken connection. Use `spawn()` instead to start a fresh session with a working MCP link.

@@ -83,6 +83,15 @@ Resume a dead agent session. Manager only. Looks up the agent's session ID and w
 
 Updates the agent's registry entry with the new kitty window.
 
+### spawn(cwd?, win?)
+
+Launch a fresh claude agent in a new kitty tab. Manager only. The new agent will call `register()` on startup per its CLAUDE.md guidance.
+
+- `cwd`: Working directory. Defaults to home directory.
+- `win`: Optional. Kitty window to use instead of creating a new tab.
+
+Returns the window ID. Use `delegate(win, ...)` once the agent has registered.
+
 ## delegate vs chat
 
 - **delegate**: "Do this work." Creates a tracked task, kicks the agent.

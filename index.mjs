@@ -356,6 +356,17 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ['agent'],
       },
     },
+    {
+      name: 'spawn',
+      description: 'Launch a fresh claude agent in an idle kitty tab. The agent will register itself on startup. Manager only.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          cwd: { type: 'string', description: 'Working directory for the new agent. Defaults to home directory.' },
+          win: { type: 'number', description: 'Kitty window to use. Omit to auto-find an idle tab.' },
+        },
+      },
+    },
   ],
 }));
 
@@ -939,6 +950,37 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     const label = agent.friendly_name || agent.name || agent.id;
     return { content: [{ type: 'text', text: `Respawning "${label}" in win ${targetWin}: ${cmd}` }] };
+  }
+
+  // ---- spawn ----
+  if (name === 'spawn') {
+    const guard = requireManager();
+    if (guard) return { content: [{ type: 'text', text: guard }], isError: true };
+
+    const cwd = args.cwd || os.homedir();
+    let targetWin = args.win || null;
+
+    try {
+      const sock = execSync(`ls -t /tmp/kitty-sock-* 2>/dev/null | head -1`, { encoding: 'utf8' }).trim();
+      if (!sock) throw new Error('no kitty socket found');
+
+      if (!targetWin) {
+        // Launch a new tab, get the window ID back
+        const winId = execSync(`kitty @ --to "unix:${sock}" launch --type=tab --cwd "${cwd}"`, { encoding: 'utf8', timeout: 10000 }).trim();
+        targetWin = parseInt(winId, 10);
+        if (isNaN(targetWin)) throw new Error(`kitty launch returned unexpected value: ${winId}`);
+      }
+
+      // Send claude command
+      const cmd = `cd ${JSON.stringify(cwd)} && claude`;
+      const escaped = cmd.replace(/\\/g, '\\\\');
+      execSync(`kitty @ --to "unix:${sock}" send-text --match "id:${targetWin}" "${escaped}"`, { encoding: 'utf8', timeout: 10000 });
+      execSync(`kitty @ --to "unix:${sock}" send-text --match "id:${targetWin}" '\\r'`, { encoding: 'utf8', timeout: 10000 });
+    } catch (e) {
+      return { content: [{ type: 'text', text: `Failed to spawn: ${e.message}` }], isError: true };
+    }
+
+    return { content: [{ type: 'text', text: `Spawned new agent in win ${targetWin} (cwd: ${cwd}). It will register itself on startup. Use delegate(${targetWin}, ...) once it's registered.` }] };
   }
 
   return { content: [{ type: 'text', text: `Unknown tool: ${name}` }], isError: true };
