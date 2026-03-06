@@ -21,7 +21,7 @@ sleep 0.1
 
 # Check if prompt is clear (last non-blank line is just ❯ or >)
 last_line=$(kitty @ --to "unix:$SOCK" get-text --match "$match" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -1)
-if [[ "$last_line" =~ ^[[:space:]]*[❯\>][[:space:]]*$ ]]; then
+if [[ "$last_line" =~ ^[[:space:]]*[❯\>][[:space:]📬]*$ ]]; then
     # Idle — safe to send 📬 + Enter so the agent processes it immediately
     kitty @ --to "unix:$SOCK" send-text --match "$match" '📬\r' 2>/dev/null
     echo "kicked $match"
