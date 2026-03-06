@@ -62,8 +62,10 @@ Add to your Claude Code MCP config (`~/.claude/settings.json`):
 
 | Tool | Description |
 |------|-------------|
-| `delegate(agent, description, message, after?)` | Assign a tracked task + kick agent. |
+| `delegate(agent, description, message, after?, friendly_name?)` | Assign a tracked task + kick agent. |
 | `wait_for_any(timeout?, interval?)` | Block until any agent reports. |
+| `name_agent(agent, friendly_name)` | Set a friendly name for an agent (e.g. "sims guy"). |
+| `respawn(agent, win?)` | Resume a dead agent session in an idle kitty tab. |
 | `unregister_manager(to?)` | Step down or hand off manager role. |
 | `task_check(win)` | Read agent's kitty terminal (escape hatch). |
 
