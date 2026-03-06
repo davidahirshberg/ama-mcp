@@ -376,9 +376,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     const id = ME || agentName;
 
-    // Guard: can't claim manager if someone else already is
+    // Guard: can't claim manager if someone else already is (unless they're dead)
     if (isManager && state.manager && state.manager !== id) {
-      return { content: [{ type: 'text', text: `Manager already registered (${state.manager}). Only the current manager can re-register as manager.` }], isError: true };
+      const currentManager = getAgent(state, state.manager);
+      const managerAlive = currentManager?.kitty_win && kittyWindowExists(currentManager.kitty_win);
+      if (managerAlive) {
+        return { content: [{ type: 'text', text: `Manager already registered (${state.manager}). Only the current manager can re-register as manager.` }], isError: true };
+      }
+      // Current manager is dead — allow takeover
+      if (currentManager) removeAgent(state, state.manager);
     }
 
     // Upsert: preserve friendly_name from old entry, then remove
