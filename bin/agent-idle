@@ -1,0 +1,27 @@
+#!/bin/bash
+# Usage: agent-idle <window-id|pattern>
+# Exit 0 if the window shows an idle Claude prompt, exit 1 otherwise.
+# Idle = prompt char (❯ or >) with only whitespace/📬, above a separator line.
+# Also returns 1 if "esc to interrupt" is visible (agent is working).
+SOCK=$(ls -t /tmp/kitty-sock-* 2>/dev/null | head -1)
+[ -z "$SOCK" ] && exit 1
+
+pattern="$1"
+match=""
+if [[ "$pattern" =~ ^[0-9]+$ ]]; then
+    match="id:$pattern"
+else
+    match="title:$pattern"
+fi
+
+screen=$(kitty @ --to "unix:$SOCK" get-text --match "$match" 2>/dev/null) || exit 1
+[[ -z "$screen" ]] && exit 1
+
+# Working if "esc to interrupt" visible
+echo "$screen" | grep -q "esc to interrupt" && exit 1
+
+# Find prompt line: the non-blank line just above a separator (───...)
+prompt_line=$(echo "$screen" | grep -v '^[[:space:]]*$' | grep -B1 '^[[:space:]─━═-]*$' | grep -v '^[[:space:]─━═-]*$' | tail -1)
+[[ "$prompt_line" =~ ^[[:space:]]*[❯\>][[:space:]📬]*$ ]] && exit 0
+
+exit 1

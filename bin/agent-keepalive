@@ -74,18 +74,8 @@ print('|'.join(parts))
 
   [[ -z "$reason" ]] && continue
 
-  # Check if manager is idle
-  output=$("$BIN/agent-read" "$manager_win" 2>/dev/null) || continue
-  [[ -z "$output" ]] && continue
-
-  if echo "$output" | grep -q "esc to interrupt"; then
-    continue  # manager is working
-  fi
-
-  prompt_line=$(echo "$output" | grep -v '^[[:space:]]*$' | grep -B1 '^[[:space:]─━═-]*$' | grep -v '^[[:space:]─━═-]*$' | tail -1)
-  if ! echo "$prompt_line" | grep -qE '^[[:space:]]*[❯>][[:space:]📬]*$'; then
-    continue  # not idle
-  fi
+  # Only kick if manager is idle
+  "$BIN/agent-idle" "$manager_win" 2>/dev/null || continue
 
   # Write reason to state file as a message, then kick
   python3 -c "

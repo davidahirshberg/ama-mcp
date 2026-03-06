@@ -1,13 +1,13 @@
 #!/bin/bash
-# Usage: agent-kick <window-id|pattern> [message]
-# Notifies a kitty window that it has something to read.
-# Sends ESC (interrupts blocking calls) + 📬 + Enter.
+# Usage: agent-kick <window-id|pattern>
+# Notifies a kitty window: ESC (interrupts blocking calls) + 📬.
+# If idle, sends Enter too so the agent processes it immediately.
 # Message content lives in the state file — recipients read via my_task().
+BIN="$(cd "$(dirname "$0")" && pwd)"
 SOCK=$(ls -t /tmp/kitty-sock-* 2>/dev/null | head -1)
 [ -z "$SOCK" ] && { echo "no kitty socket found" >&2; exit 1; }
 
 pattern="$1"
-
 match=""
 if [[ "$pattern" =~ ^[0-9]+$ ]]; then
     match="id:$pattern"
@@ -19,15 +19,10 @@ fi
 kitty @ --to "unix:$SOCK" send-key --match "$match" escape 2>/dev/null || { echo "no window found matching: $pattern" >&2; exit 1; }
 sleep 0.1
 
-# Check if prompt is idle: look for ❯ + only mailboxes/whitespace above a separator line
-screen=$(kitty @ --to "unix:$SOCK" get-text --match "$match" 2>/dev/null)
-prompt_line=$(echo "$screen" | grep -v '^[[:space:]]*$' | grep -B1 '^[[:space:]─━═-]*$' | grep -v '^[[:space:]─━═-]*$' | tail -1)
-if [[ "$prompt_line" =~ ^[[:space:]]*[❯\>][[:space:]📬]*$ ]]; then
-    # Idle — safe to send 📬 + Enter so the agent processes it immediately
+if "$BIN/agent-idle" "$pattern" 2>/dev/null; then
     kitty @ --to "unix:$SOCK" send-text --match "$match" '📬\r' 2>/dev/null
     echo "kicked $match"
 else
-    # Someone typing or agent working — just inject 📬 without submitting
     kitty @ --to "unix:$SOCK" send-text --match "$match" '📬' 2>/dev/null
     echo "nudged $match"
 fi

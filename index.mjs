@@ -34,7 +34,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const BIN = path.join(__dirname, 'bin');
 
 const STATE_FILE = `${os.homedir()}/.claude/agent-tasks.json`;
-const ME = process.env.AGENT_WIN ? parseInt(process.env.AGENT_WIN) : null;
+const ME = process.env.AGENT_WIN ? parseInt(process.env.AGENT_WIN)
+  : process.env.KITTY_WINDOW_ID ? parseInt(process.env.KITTY_WINDOW_ID)
+  : null;
 
 // ---- State helpers ----
 
@@ -99,7 +101,7 @@ function now() {
 }
 
 function requireManager() {
-  if (!ME) return 'Cannot identify caller — $AGENT_WIN not set.';
+  if (!ME) return 'Cannot identify caller — $KITTY_WINDOW_ID not set.';
   const state = loadState();
   if (state.manager !== ME) return `Only the manager (win ${state.manager ?? 'unregistered'}) can do this. You are win ${ME}.`;
   return null;
@@ -188,15 +190,13 @@ function readWindow(win) {
   }
 }
 
-function isIdle(output) {
-  const lines = output.split('\n').filter(l => l.trim());
-  if (!lines.length) return false;
-  if (lines.some(l => /esc to interrupt/.test(l))) return false;
-  const chromePattern = /^[\s─━═\-]+$|^\s*(\?|esc |[0-9]+ bash|\u2193|Context left|Tip:)/;
-  const filtered = lines.filter(l => !chromePattern.test(l));
-  if (!filtered.length) return false;
-  const last = filtered[filtered.length - 1];
-  return /^[❯>]\s*$/.test(last);
+function isIdle(win) {
+  try {
+    execSync(`${BIN}/agent-idle ${win}`, { timeout: 5000 });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function windowTail(output, n = 40) {
@@ -378,9 +378,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const isManager = name === 'register_manager' || args.manager === true;
     const agentName = args.name || null;
 
-    // Need either AGENT_WIN or a name
+    // Need either KITTY_WINDOW_ID or a name
     if (!ME && !agentName) {
-      return { content: [{ type: 'text', text: '$AGENT_WIN not set and no name provided. Set AGENT_WIN or pass name for headless agents.' }], isError: true };
+      return { content: [{ type: 'text', text: '$KITTY_WINDOW_ID not set and no name provided. Set AGENT_WIN or pass name for headless agents.' }], isError: true };
     }
 
     const state = loadState();
@@ -522,7 +522,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const task = {
       id: taskId,
       agent,
-      ...(typeof agent === 'number' ? { win: agent } : {}),
       description,
       message,
       delegated_at: now(),
@@ -586,7 +585,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   // ---- wait_for_task ----
   if (name === 'wait_for_task') {
-    if (!ME) return { content: [{ type: 'text', text: '$AGENT_WIN not set.' }], isError: true };
+    if (!ME) return { content: [{ type: 'text', text: '$KITTY_WINDOW_ID not set.' }], isError: true };
     const timeoutMs = Math.min(args.timeout ?? 600, 600) * 1000;
     const intervalMs = 5000;
     const deadline = Date.now() + timeoutMs;
@@ -759,7 +758,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   // ---- task_done ----
   if (name === 'task_done') {
     const agent = args.agent ? resolveAgent(args.agent) : ME;
-    if (!agent) return { content: [{ type: 'text', text: 'No agent specified and $AGENT_WIN not set.' }], isError: true };
+    if (!agent) return { content: [{ type: 'text', text: 'No agent specified and $KITTY_WINDOW_ID not set.' }], isError: true };
 
     if (agent !== ME) {
       const guard = requireManager();
@@ -808,10 +807,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
       return { content: [{ type: 'text', text: `Cannot read win ${win}: ${result.error}. Agent removed from registry.` }], isError: true };
     }
-    const idle = isIdle(result.text);
+    const idle = isIdle(win);
 
     const state = loadState();
-    const task = state.tasks.find(t => (t.win === win || t.agent === win) && t.status !== 'done');
+    const task = state.tasks.find(t => t.agent === win && t.status !== 'done');
     if (task) {
       if (idle && task.status === 'working') task.status = 'idle';
       task.last_checked = now();
@@ -835,7 +834,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   // ---- my_task ----
   if (name === 'my_task') {
-    if (!ME) return { content: [{ type: 'text', text: '$AGENT_WIN not set.' }], isError: true };
+    if (!ME) return { content: [{ type: 'text', text: '$KITTY_WINDOW_ID not set.' }], isError: true };
     const state = loadState();
     const task = getTask(state, ME);
     const unread = getUnread(state, ME);

@@ -18,14 +18,6 @@ allow_remote_control socket-only
 listen_on unix:/tmp/kitty-sock-{kitty_pid}
 ```
 
-### Shell alias
-
-The `claude` alias passes the kitty window ID to the MCP server so it can identify which agent is calling:
-
-```bash
-alias claude="AGENT_WIN=$KITTY_WINDOW_ID command claude"
-```
-
 ## Setup
 
 ```bash

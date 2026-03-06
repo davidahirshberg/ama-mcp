@@ -8,7 +8,7 @@ Agents can be terminal Claude Code sessions (identified by kitty window ID) or h
 
 ### register(manager?, session_id?, name?)
 
-All agents call this at session start. Stores the agent in the registry with kitty window ID (from `$AGENT_WIN`), optional session ID / name, and working directory (`$PWD`). Preserves any friendly name assigned by the manager across re-registrations.
+All agents call this at session start. Stores the agent in the registry with kitty window ID (from `$KITTY_WINDOW_ID`), optional session ID / name, and working directory (`$PWD`). Preserves any friendly name assigned by the manager across re-registrations.
 
 - `manager`: set true to register as manager (starts keepalive watcher)
 - `session_id`: Claude session ID (for JSONL lookup)
@@ -55,7 +55,7 @@ Mark a task done. No args = mark own task. Marking another agent's task requires
 
 ### my_task()
 
-Show own task, unread messages (reads them inline). Uses `$AGENT_WIN`.
+Show own task, unread messages (reads them inline). Uses `$KITTY_WINDOW_ID`.
 
 ### register_manager()
 
