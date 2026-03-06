@@ -99,22 +99,27 @@ Background process (auto-started by `register(manager=true)`) polls every 45 sec
 
 Task and message state persists in `~/.claude/agent-tasks.json`. Survives context compaction and session restarts. Agent registry tracks who's online and where to kick them.
 
-## Configuration instructions
+## Configuration
 
-[`managing-agents.md`](managing-agents.md) is an example of how to configure Claude Code agent behavior using reference instructions. It covers:
+Add this to your `CLAUDE.md` (global or per-project) so every agent knows how to participate:
 
-- **Meta session patterns** — how a manager session should handle guidance changes, intervene in other sessions, and identify the right window
-- **Tool usage** — the full tool reference, notification model, agent lifecycle
-- **Behavioral guidelines** — when to intervene, how to monitor, what requires approval
+```markdown
+## Agent Manager
 
-This file is meant to be symlinked into `~/.claude/reference/` and referenced from your `CLAUDE.md`. It's a working example from actual use — not a sanitized template.
+All sessions have the `agent-manager` MCP server. Call `register()` at session start. If you see **📬** as input, call `my_task()` — it means you have a new task or message.
+
+If you're delegated a task but you're mid-work on something unrelated, push back via `chat()` — the manager can reassign.
+```
+
+### Manager reference (optional)
+
+[`managing-agents.md`](managing-agents.md) has detailed guidance for the manager session — tool usage, behavioral guidelines, intervention patterns. Symlink it and reference from your `CLAUDE.md`:
 
 ```bash
 ln -s /path/to/ama-mcp/managing-agents.md ~/.claude/reference/managing-agents.md
 ```
 
-Then in your `CLAUDE.md`:
-```
+```markdown
 - **managing-agents.md** — meta sessions, inter-agent communication, agent-manager MCP tools
 ```
 
