@@ -95,7 +95,7 @@ msg = {'to': state.get('manager'), 'from': 'keepalive', 'text': sys.argv[1], 'ti
 state.setdefault('messages', []).append(msg)
 with open('$STATE_FILE', 'w') as f: json.dump(state, f, indent=2)
 " "$(echo "$reason" | tr '|' '. ')" 2>/dev/null
-  "$BIN/agent-ask" "$manager_win" >/dev/null 2>&1
+  "$BIN/agent-kick" "$manager_win" >/dev/null 2>&1
   LAST_KICK=$now_epoch
   log "kicked manager (win $manager_win): $reason"
 done

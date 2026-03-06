@@ -1,5 +1,5 @@
 #!/bin/bash
-# Usage: agent-ask <window-id|pattern> [message]
+# Usage: agent-kick <window-id|pattern> [message]
 # Notifies a kitty window that it has something to read.
 # Sends ESC (interrupts blocking calls) + 📬 + Enter.
 # Message content lives in the state file — recipients read via my_task().

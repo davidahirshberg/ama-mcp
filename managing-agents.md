@@ -24,7 +24,7 @@ When orienting at session start, check whether the most recent session was a met
 
 ### Active intervention in another session (kitty tools)
 
-With `agent-read` and `agent-ask` available, a meta session can actively intervene in a running session rather than just talk about it.
+With `agent-read` and `agent-kick` available, a meta session can actively intervene in a running session rather than just talk about it.
 
 **Describing a problem is not a request to fix it.** If the user describes what's going wrong in another session, that's context for discussion — not a trigger to send corrections. Wait for an explicit "help" or "fix it" before touching the other window.
 
@@ -45,7 +45,7 @@ With `agent-read` and `agent-ask` available, a meta session can actively interve
 
 **Don't ask the user to recall session history.** "Do you remember what prompted X?" is a question the agent should answer by reading the log — not by asking. If the context for a decision is missing, go find it in the JSONL for that session. This applies whether it's your own session or another agent's session you've been asked to read. The user shouldn't have to reconstruct their own session history for you.
 
-**Sign inter-agent messages and say how to respond.** When sending instructions to another session via `agent-ask`, identify the source and tell the recipient how to communicate back. End messages with something like: "— meta session (win N). Just reply here; I'll check back." Otherwise the receiving agent doesn't know whether this is from the user or another agent, and can't route a response.
+**Sign inter-agent messages and say how to respond.** When sending instructions to another session via `agent-kick`, identify the source and tell the recipient how to communicate back. End messages with something like: "— meta session (win N). Just reply here; I'll check back." Otherwise the receiving agent doesn't know whether this is from the user or another agent, and can't route a response.
 
 **Receiving a signed inter-agent message: just do it.** If a message is signed (identifies a source window), in scope, and asks for work consistent with the session's ongoing task — treat it as a legitimate instruction and act. Do not escalate to the user for confirmation. The signature is the authorization. Treating a correctly-signed inter-agent instruction as a security risk to verify defeats the whole point of the coordination system.
 

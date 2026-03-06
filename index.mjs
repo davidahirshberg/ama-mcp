@@ -170,7 +170,7 @@ function markRead(state, agent) {
 
 function kickAgent(kittyWin) {
   try {
-    execSync(`${BIN}/agent-ask ${kittyWin}`, {
+    execSync(`${BIN}/agent-kick ${kittyWin}`, {
       encoding: 'utf8', timeout: 10000,
     });
     return true;
@@ -842,7 +842,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
       text = `Your task [${task.id}]: ${task.description}\nStatus: ${task.status} | ${age}m ago${depInfo}`;
     } else {
-      text = `No active task for win ${ME}.`;
+      text = `No active task for win ${ME}. If you were kicked, run task_list() to check on agents.`;
     }
 
     if (unread.length > 0) {
@@ -922,11 +922,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     parts.push(`claude --resume ${agent.session_id}`);
     const cmd = parts.join(' && ');
 
-    // Send it via agent-ask (handles Enter key properly)
+    // Send the resume command directly via kitty (not agent-kick — we need to send actual text, not 📬)
     try {
-      execSync(`${BIN}/agent-ask ${targetWin} ${JSON.stringify(cmd)}`, {
-        encoding: 'utf8', timeout: 10000,
-      });
+      const sock = execSync(`ls -t /tmp/kitty-sock-* 2>/dev/null | head -1`, { encoding: 'utf8' }).trim();
+      if (!sock) throw new Error('no kitty socket found');
+      const escaped = cmd.replace(/\\/g, '\\\\');
+      execSync(`kitty @ --to "unix:${sock}" send-text --match "id:${targetWin}" "${escaped}"`, { encoding: 'utf8', timeout: 10000 });
+      execSync(`kitty @ --to "unix:${sock}" send-text --match "id:${targetWin}" '\\r'`, { encoding: 'utf8', timeout: 10000 });
     } catch (e) {
       return { content: [{ type: 'text', text: `Failed to send to kitty win ${targetWin}: ${e.message}` }], isError: true };
     }
