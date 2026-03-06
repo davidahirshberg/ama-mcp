@@ -57,15 +57,17 @@ With `agent-read` and `agent-ask` available, a meta session can actively interve
 
 ### Tools
 
-- `register(manager?, session_id?, name?)` — register this agent. **All agents call this at session start.** Adds to the agent registry so kicks work. Pass `manager=true` for the manager session.
-- `delegate(agent, description, message, after?)` — assign a task. Writes to state and kicks the agent via kitty. `agent` is a kitty window ID (number) or agent name (string). Optional `after` takes a task ID or array — task is blocked until all complete.
+- `register(manager?, session_id?, name?)` — register this agent. **All agents call this at session start.** Adds to the agent registry so kicks work. Captures `$PWD` as working directory. Pass `manager=true` for the manager session.
+- `delegate(agent, description, message, after?, friendly_name?)` — assign a task. Writes to state and kicks the agent via kitty. `agent` is a kitty window ID, agent name, or friendly name. Optional `after` for dependencies. Optional `friendly_name` to name the agent on first delegation.
 - `chat(message, to?)` — send a message. Writes to state and kicks the recipient via kitty. Omit `to` to send to the manager.
 - `wait_for_task(timeout?)` — block until a task or message arrives. Agents call this when idle. Polls every 5s.
 - `wait_for_any(timeout?, interval?)` — block until any agent sends a message or a task status changes. Manager use. Default timeout 600s.
-- `task_list()` — show all active tasks + registered agents. **Call at session start.**
+- `task_list()` — show all active tasks + registered agents. **Call at session start.** Shows friendly names when set.
 - `task_done(agent?)` — mark a task done. No args = mark own task. Marking another agent's task requires manager. Automatically unblocks dependent tasks and kicks them.
 - `task_check(win)` — **escape hatch.** Read an agent's kitty terminal directly. For stuck/unresponsive agents only.
 - `my_task()` — show own task and read unread messages.
+- `name_agent(agent, friendly_name)` — set/change a friendly name. Manager only. Names persist across re-registrations.
+- `respawn(agent, win?)` — resume a dead agent by name. Finds an idle kitty tab, cd's to the agent's cwd, runs `claude --resume`. Manager only.
 - `register_manager()` — alias for `register(manager=true)`.
 - `unregister_manager(to?)` — step down as manager. Pass `to` to hand off to a specific agent.
 
@@ -93,6 +95,29 @@ Agents must be registered for kicks to work. Headless agents (no kitty) must pol
 
 - **Terminal agents**: identified by kitty window ID (number). These are Claude Code sessions.
 - **Headless agents**: identified by name (string, e.g. "todd"). These are processes like Todd (the tlda triage agent) that run outside of kitty.
+
+### Agent naming
+
+Agents have friendly names — human-readable labels like "sims guy" or "survival paper" that the manager uses instead of session IDs or window numbers. Names are a manager-side concept; agents don't need to know their own names.
+
+- Set a name: `name_agent(agent, "sims guy")` or `delegate(agent, ..., friendly_name="sims guy")`
+- Names persist across re-registrations (agent restarts don't lose the name)
+- All tools that accept an agent identifier also accept friendly names
+- `task_list()` shows friendly names when set
+
+Pick up names naturally from context — if the user calls someone "sims guy," name them that.
+
+### Respawning agents
+
+When an agent session dies (window closed, crash, etc.), the manager can bring it back:
+
+```
+respawn("sims guy")
+```
+
+This looks up the agent's session ID and working directory from the registry, finds an idle kitty tab (or the agent's old window if still alive), and runs `cd <cwd> && claude --resume <session_id>`. The agent's registry entry is updated with the new window.
+
+If no idle tab is available, open a new terminal tab and try again, or pass `win` explicitly.
 
 ### delegate vs chat
 
@@ -123,6 +148,10 @@ Auto-started by `register_manager`. Kicks the manager (via kitty — the one rem
 
 ### Behavioral guidelines
 
+**Choose the right agent.** Before delegating, check `task_list()` — pick an agent that's free and has context on the topic. An agent already working on the survival paper should get survival tasks; one deep in infrastructure work shouldn't be pulled off for an unrelated referee report. If no one has context, pick whoever's free.
+
+**Agents: push back on wrong assignments.** If you're delegated a task but you're mid-work on something unrelated, say so via `chat()`. The manager can reassign. Don't silently drop what you're doing.
+
 **Intervene on mistakes, not imprecision.** When an agent's reasoning is muddled but the action is correct, let it run. The test: will this confusion cause a wrong action? If yes, correct now. If no, note it and move on.
 
 **Redirect without explanation when an agent is stuck.** Give the right target and move on. At low context especially, every token costs working memory — be terse.
@@ -134,3 +163,7 @@ Auto-started by `register_manager`. Kicks the manager (via kitty — the one rem
 **What requires approval vs. what doesn't.** Things that warrant checking with the user: remote pushes, external services, sending messages outside the local system. Everything else — file edits, script updates, cluster submissions — just do it, following existing guidance.
 
 **When the user is actively talking to an agent in another window, don't interject.** They're handling it. Read the output afterward and update other agents accordingly.
+
+**Narrate agent exchanges.** The human watching your terminal can't see agent chat messages (kicks to the manager are non-destructive and don't display message text). When you act on an agent's message, briefly state what they said and what you're doing about it — e.g. "Win 7 says the sim finished with 3% bias. Delegating the report script." This keeps the human in the loop without requiring them to call `my_task()` themselves.
+
+**If you receive 📬 as input, call `my_task()`.** This is a notification that an agent sent you a message. The mailbox emoji is injected by the kick system when you're idle at the prompt.

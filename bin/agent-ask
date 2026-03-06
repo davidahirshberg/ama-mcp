@@ -1,14 +1,13 @@
 #!/bin/bash
-# Usage: agent-ask <window-id|pattern> <message>
-# Matches by window ID first, then falls back to title pattern
+# Usage: agent-ask <window-id|pattern> [message]
+# Notifies a kitty window that it has something to read.
+# Sends ESC (interrupts blocking calls) + 📬 + Enter.
+# Message content lives in the state file — recipients read via my_task().
 SOCK=$(ls -t /tmp/kitty-sock-* 2>/dev/null | head -1)
 [ -z "$SOCK" ] && { echo "no kitty socket found" >&2; exit 1; }
 
 pattern="$1"
-shift
-message="$*"
 
-# Try matching by window id first, then by title
 match=""
 if [[ "$pattern" =~ ^[0-9]+$ ]]; then
     match="id:$pattern"
@@ -16,9 +15,9 @@ else
     match="title:$pattern"
 fi
 
-# Escape backslashes so kitty's Python escape interpreter doesn't mangle \n etc.
-escaped=$(printf '%s' "$message" | sed 's/\\/\\\\/g')
-# Send text + enter back-to-back with no sleep — the old 0.2s sleep between them caused the race.
-kitty @ --to "unix:$SOCK" send-text --match "$match" "$escaped" 2>/dev/null || { echo "no window found matching: $pattern" >&2; exit 1; }
-kitty @ --to "unix:$SOCK" send-key --match "$match" enter 2>/dev/null
-echo "sent to $match"
+# ESC interrupts blocking tool calls (wait_for_any, wait_for_task)
+kitty @ --to "unix:$SOCK" send-key --match "$match" escape 2>/dev/null || { echo "no window found matching: $pattern" >&2; exit 1; }
+sleep 0.1
+# 📬 + Enter — agent sees it as input, calls my_task()
+kitty @ --to "unix:$SOCK" send-text --match "$match" '📬\r' 2>/dev/null
+echo "kicked $match"

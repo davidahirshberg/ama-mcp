@@ -87,10 +87,8 @@ print('|'.join(parts))
     continue  # not idle
   fi
 
-  # Format and send
-  msg="Kick: $(echo "$reason" | tr '|' '. '). Run task_list() and check on your agents — read their output, see if they've flagged issues or questions. Don't just wait, look at what they're telling you. — keepalive watcher"
-
-  "$BIN/agent-ask" "$manager_win" "$msg" >/dev/null 2>&1
+  # Kick the manager (agent-ask sends 📬 + Enter)
+  "$BIN/agent-ask" "$manager_win" >/dev/null 2>&1
   LAST_KICK=$now_epoch
-  log "kicked manager (win $manager_win): $msg"
+  log "kicked manager (win $manager_win): $reason"
 done

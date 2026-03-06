@@ -1,0 +1,14 @@
+#!/bin/bash
+# Usage: agent-exists <window-id>
+# Exit 0 if window exists, 1 if not. No output.
+SOCK=$(ls -t /tmp/kitty-sock-* 2>/dev/null | head -1)
+[ -z "$SOCK" ] && exit 1
+
+pattern="$1"
+if [[ "$pattern" =~ ^[0-9]+$ ]]; then
+    match="id:$pattern"
+else
+    match="title:$pattern"
+fi
+
+kitty @ --to "unix:$SOCK" get-text --match "$match" >/dev/null 2>&1

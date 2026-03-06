@@ -8,20 +8,21 @@ Agents can be terminal Claude Code sessions (identified by kitty window ID) or h
 
 ### register(manager?, session_id?, name?)
 
-All agents call this at session start. Stores the agent in the registry with kitty window ID (from `$AGENT_WIN`) and optional session ID / name.
+All agents call this at session start. Stores the agent in the registry with kitty window ID (from `$AGENT_WIN`), optional session ID / name, and working directory (`$PWD`). Preserves any friendly name assigned by the manager across re-registrations.
 
 - `manager`: set true to register as manager (starts keepalive watcher)
 - `session_id`: Claude session ID (for JSONL lookup)
 - `name`: agent name (for headless agents without a kitty window)
 
-### delegate(agent, description, message, after?)
+### delegate(agent, description, message, after?, friendly_name?)
 
 Assign a task to an agent. Writes task to state and kicks the agent via kitty so they know to check. Manager only.
 
-- `agent`: Kitty window ID (number) or agent name (string, e.g. "todd")
+- `agent`: Kitty window ID (number), agent name, or friendly name
 - `description`: Short human-readable label (5-10 words)
 - `message`: Full task message
 - `after`: Optional. Task ID or array of IDs — task is blocked until all complete.
+- `friendly_name`: Optional. Set a friendly name for the agent (same as `name_agent`).
 
 Returns task ID. Use in `after` for dependent tasks.
 
@@ -64,6 +65,24 @@ Alias for `register(manager=true)`.
 
 Step down as manager. Manager only. Pass `to` to hand the role to a specific registered agent (they get kicked to let them know). Omit `to` to just vacate the slot.
 
+### name_agent(agent, friendly_name)
+
+Set or change a friendly name for an agent. Manager only. Names are for manager/human communication — agents don't need to know their names.
+
+- `agent`: Agent identifier (kitty win, session ID, or current name)
+- `friendly_name`: Human-readable name (e.g. "sims guy", "survival paper")
+
+Names persist across agent re-registrations. All tools that accept an agent identifier also accept friendly names.
+
+### respawn(agent, win?)
+
+Resume a dead agent session. Manager only. Looks up the agent's session ID and working directory from the registry, finds an idle kitty tab, and runs `cd <cwd> && claude --resume <session_id>`.
+
+- `agent`: Agent identifier or friendly name
+- `win`: Optional. Kitty window to use. Omit to auto-find an idle tab (prefers the agent's old window if alive, then any idle tab not assigned to another agent).
+
+Updates the agent's registry entry with the new kitty window.
+
 ## delegate vs chat
 
 - **delegate**: "Do this work." Creates a tracked task, kicks the agent.
@@ -84,9 +103,13 @@ If you'd want to know when it's done, use `delegate`.
 
 The state file (`~/.claude/agent-tasks.json`) is the source of truth. Kitty is the doorbell:
 
-- `delegate()` writes task → kicks agent: "New task assigned. Call wait_for_task()."
-- `chat()` writes message → kicks recipient: "New message. Call my_task()."
-- `task_done()` with unblocked deps → kicks each unblocked agent.
+- `delegate()` writes task → kicks agent via kitty
+- `chat()` writes message → kicks recipient via kitty
+- `task_done()` with unblocked deps → kicks each unblocked agent
+
+**Kicks are 📬.** Every kick sends `ESC` (interrupts blocking calls like `wait_for_any`) then `📬` + Enter to the agent's kitty window. The 📬 appears as input text. No message content is sent through the terminal — the actual task or message lives in the state file.
+
+**When you see 📬 as input, call `my_task()`.** This is the universal response. `my_task()` returns your current task and any unread messages.
 
 Headless agents (no kitty window) must poll via `wait_for_task()`.
 
@@ -99,10 +122,15 @@ Headless agents (no kitty window) must poll via `wait_for_task()`.
   "id": 7,
   "kitty_win": 7,
   "session_id": "a0ff6112-...",
+  "friendly_name": "sims guy",
+  "cwd": "/Users/skip/work/bregman-lower-bound",
   "registered_at": "ISO timestamp",
   "is_manager": false
 }
 ```
+
+- `friendly_name`: Set by manager via `name_agent()` or `delegate(friendly_name=...)`. Persists across re-registrations.
+- `cwd`: Captured automatically from `$PWD` at registration. Used by `respawn()` to cd before resuming.
 
 Lazy cleanup: when any tool tries to interact with an agent's kitty window and it's gone, the agent is removed from the registry.
 

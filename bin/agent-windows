@@ -1,0 +1,22 @@
+#!/bin/bash
+# List kitty windows as JSON: [{id, at_prompt, cwd, fg}]
+# Used by respawn() to find idle tabs.
+SOCK=$(ls -t /tmp/kitty-sock-* 2>/dev/null | head -1)
+[ -z "$SOCK" ] && { echo "[]"; exit 0; }
+
+kitty @ --to "unix:$SOCK" ls 2>/dev/null | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+windows = []
+for os_win in data:
+    for tab in os_win.get('tabs', []):
+        for win in tab.get('windows', []):
+            fg = [p.get('cmdline', []) for p in win.get('foreground_processes', [])]
+            windows.append({
+                'id': win['id'],
+                'at_prompt': win.get('at_prompt', False),
+                'cwd': win.get('cwd', ''),
+                'fg': fg,
+            })
+json.dump(windows, sys.stdout)
+" || echo "[]"

@@ -1,0 +1,25 @@
+#!/bin/bash
+# List all kitty windows: id + last line of content
+SOCK=$(ls -t /tmp/kitty-sock-* 2>/dev/null | head -1)
+[ -z "$SOCK" ] && { echo "no kitty socket found"; exit 1; }
+
+kitty @ --to "unix:$SOCK" ls 2>/dev/null | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for os_win in data:
+    ow = os_win['id']
+    for tab in os_win.get('tabs', []):
+        tid = tab['id']
+        tab_title = tab.get('title', '')
+        wins = tab.get('windows', [])
+        for win in wins:
+            wid = win['id']
+            fg = win.get('foreground_processes', [{}])
+            cmd = ' '.join(fg[0].get('cmdline', ['?'])) if fg else '?'
+            # Shorten voice-mode path to just 'voice-mode'
+            if 'voice-mode' in cmd:
+                cmd = 'voice-mode'
+            elif 'caffeinate' in cmd:
+                cmd = 'caffeinate'
+            print(f'OS:{ow} Tab:{tid} Win:{wid}  {cmd}  {tab_title}')
+" || echo "kitty not running or remote control not enabled"

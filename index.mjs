@@ -116,17 +116,17 @@ function resolveAgent(val) {
 
 function getAgent(state, id) {
   if (!state.agents) return null;
-  return state.agents.find(a => a.id === id || a.kitty_win === id || a.name === id);
+  return state.agents.find(a => a.id === id || a.kitty_win === id || a.name === id || a.friendly_name === id);
 }
 
 function removeAgent(state, id) {
   if (!state.agents) return;
-  state.agents = state.agents.filter(a => a.id !== id && a.kitty_win !== id && a.name !== id);
+  state.agents = state.agents.filter(a => a.id !== id && a.kitty_win !== id && a.name !== id && a.friendly_name !== id);
 }
 
 function kittyWindowExists(win) {
   try {
-    execSync(`${BIN}/agent-read ${win} 2>/dev/null | head -1`, { encoding: 'utf8', timeout: 5000 });
+    execSync(`${BIN}/agent-exists ${win}`, { timeout: 5000 });
     return true;
   } catch {
     return false;
@@ -168,9 +168,9 @@ function markRead(state, agent) {
 
 // ---- Kitty helpers ----
 
-function kickAgent(kittyWin, message) {
+function kickAgent(kittyWin) {
   try {
-    execSync(`${BIN}/agent-ask ${kittyWin} ${JSON.stringify(message)}`, {
+    execSync(`${BIN}/agent-ask ${kittyWin}`, {
       encoding: 'utf8', timeout: 10000,
     });
     return true;
@@ -204,10 +204,10 @@ function windowTail(output, n = 40) {
 }
 
 // Kick an agent via kitty if they have a window. Returns whether kick was sent.
-function notifyAgent(state, agentId, message) {
+function notifyAgent(state, agentId) {
   const agent = getAgent(state, agentId);
   if (!agent || !agent.kitty_win) return false;
-  const sent = kickAgent(agent.kitty_win, message);
+  const sent = kickAgent(agent.kitty_win);
   if (!sent) {
     // Window gone — clean up
     removeAgent(state, agentId);
@@ -243,10 +243,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       inputSchema: {
         type: 'object',
         properties: {
-          agent: { type: ['number', 'string'], description: 'Agent identifier — kitty window ID (number) or agent name (string, e.g. "todd")' },
+          agent: { type: ['number', 'string'], description: 'Agent identifier — kitty window ID (number), agent name, or friendly name' },
           description: { type: 'string', description: 'Short human-readable description (5-10 words)' },
           message: { type: 'string', description: 'Full task message for the agent' },
           after: { description: 'Task ID or array of IDs — deferred until all complete.', oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }] },
+          friendly_name: { type: 'string', description: 'Set a friendly name for the agent (optional, same as name_agent)' },
         },
         required: ['agent', 'description', 'message'],
       },
@@ -331,6 +332,30 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         },
       },
     },
+    {
+      name: 'name_agent',
+      description: 'Set or change a friendly name for an agent. Manager only. Names are for manager/human communication — agents don\'t need to know their names.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          agent: { type: ['number', 'string'], description: 'Agent identifier (kitty win, session ID, or current name)' },
+          friendly_name: { type: 'string', description: 'Friendly name (e.g. "sims guy", "survival paper")' },
+        },
+        required: ['agent', 'friendly_name'],
+      },
+    },
+    {
+      name: 'respawn',
+      description: 'Resume a dead agent session. Finds an idle kitty tab (or the agent\'s old window), cd\'s to the agent\'s working directory, and runs claude --resume. Manager only.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          agent: { type: ['number', 'string'], description: 'Agent identifier or friendly name' },
+          win: { type: 'number', description: 'Kitty window to use. Omit to auto-find an idle tab.' },
+        },
+        required: ['agent'],
+      },
+    },
   ],
 }));
 
@@ -357,7 +382,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       return { content: [{ type: 'text', text: `Manager already registered (${state.manager}). Only the current manager can re-register as manager.` }], isError: true };
     }
 
-    // Upsert: remove old entry for this agent
+    // Upsert: preserve friendly_name from old entry, then remove
+    const oldEntry = getAgent(state, id);
+    const oldFriendlyName = oldEntry?.friendly_name;
     removeAgent(state, id);
 
     const entry = {
@@ -366,7 +393,26 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     };
     if (ME) entry.kitty_win = ME;
     if (agentName) entry.name = agentName;
-    if (args.session_id) entry.session_id = args.session_id;
+    // Session ID: use explicit arg, or auto-detect from most recent JSONL
+    if (args.session_id) {
+      entry.session_id = args.session_id;
+    } else {
+      const cwd = process.env.PWD || '';
+      const projectHash = cwd.replace(/\//g, '-') || '-';
+      const projectDir = path.join(os.homedir(), '.claude', 'projects', projectHash);
+      try {
+        const jsonls = fs.readdirSync(projectDir)
+          .filter(f => f.endsWith('.jsonl'))
+          .map(f => ({ name: f, mtime: fs.statSync(path.join(projectDir, f)).mtimeMs }))
+          .sort((a, b) => b.mtime - a.mtime);
+        if (jsonls.length > 0) {
+          entry.session_id = jsonls[0].name.replace('.jsonl', '');
+        }
+      } catch { /* project dir doesn't exist, skip */ }
+    }
+    if (oldFriendlyName) entry.friendly_name = oldFriendlyName;
+    // Capture working directory for respawn
+    if (process.env.PWD) entry.cwd = process.env.PWD;
     if (isManager) entry.is_manager = true;
 
     state.agents.push(entry);
@@ -392,16 +438,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     if (isManager) {
       msg += ' Keepalive watcher running.';
+      msg += '\n\nWhen you see 📬 as input, call my_task() — it means an agent sent you a message or a task changed.';
       if (refExists) {
-        msg += '\n\nRead ~/.claude/reference/managing-agents.md before proceeding.';
+        msg += '\nRead ~/.claude/reference/managing-agents.md before proceeding.';
       } else {
         msg += `\n\n⚠ ~/.claude/reference/managing-agents.md not found. Symlink it:\n  ln -s ${repoRefPath} ${refPath}\n\nFor now, read ${path.join(__dirname, 'CLAUDE.md')} for tool reference.`;
       }
     } else {
+      msg += '\n\nWhen you see 📬 as input, call my_task() — it means you have a new task or message.';
       if (refExists) {
-        msg += '\n\nSee ~/.claude/reference/managing-agents.md for how to work with the manager.';
+        msg += '\nSee ~/.claude/reference/managing-agents.md for how to work with the manager.';
       } else {
-        msg += `\n\nSee ${path.join(__dirname, 'CLAUDE.md')} for tool reference.`;
+        msg += `\nSee ${path.join(__dirname, 'CLAUDE.md')} for tool reference.`;
       }
     }
 
@@ -423,7 +471,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       newManager.is_manager = true;
       state.manager = to;
       saveState(state);
-      notifyAgent(state, to, `You are now the manager. Call register_manager() to start keepalive. — former manager (win ${ME})`);
+      notifyAgent(state, to);
       return { content: [{ type: 'text', text: `Passed manager to ${to}.` }] };
     }
 
@@ -436,12 +484,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   if (name === 'delegate') {
     const guard = requireManager();
     if (guard) return { content: [{ type: 'text', text: guard }], isError: true };
-    const agent = resolveAgent(args.agent);
+    let agent = resolveAgent(args.agent);
     const { description, message } = args;
     const afterRaw = args.after;
     const blockedBy = afterRaw ? (Array.isArray(afterRaw) ? afterRaw : [afterRaw]) : [];
 
     const state = loadState();
+
+    // Resolve friendly name / name to canonical agent ID
+    const agentEntry = getAgent(state, agent);
+    if (agentEntry) agent = agentEntry.id;
+
+    // Set friendly name if provided
+    if (args.friendly_name) {
+      if (agentEntry) agentEntry.friendly_name = args.friendly_name;
+    }
 
     const blocked = blockedBy.length > 0 && blockedBy.some(depId => {
       const dep = getTaskById(state, depId);
@@ -468,7 +525,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // Kick agent via kitty if not blocked
     let kicked = false;
     if (!blocked) {
-      kicked = notifyAgent(state, agent, `New task assigned: ${description}. Call wait_for_task() to receive it.`);
+      kicked = notifyAgent(state, agent);
     }
 
     const pendingCount = state.tasks.filter(t => t.status === 'pending').length;
@@ -491,18 +548,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   if (name === 'chat') {
     const { message } = args;
     let to = args.to != null ? resolveAgent(args.to) : null;
+    const state = loadState();
     if (to == null) {
-      const state = loadState();
       to = state.manager;
       if (!to) return { content: [{ type: 'text', text: 'No recipient specified and no manager registered.' }], isError: true };
+    } else {
+      // Resolve friendly name to canonical ID
+      const toEntry = getAgent(state, to);
+      if (toEntry) to = toEntry.id;
     }
     const from = ME || 'unknown';
-    const state = loadState();
     postMessage(state, to, from, message);
     saveState(state);
 
     // Kick recipient
-    const kicked = notifyAgent(state, to, `New message from ${from}. Call my_task() to read it.`);
+    const kicked = notifyAgent(state, to);
 
     let warning = '';
     if (ME && state.manager === ME && message.length > 200) {
@@ -639,8 +699,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // Show registered agents
     if (agents.length > 0) {
       const agentLines = agents.map(a => {
-        let label = `${a.id}`;
+        let label = a.friendly_name ? `"${a.friendly_name}"` : `${a.id}`;
         if (a.name) label += ` (${a.name})`;
+        if (a.friendly_name) label += ` [id:${a.id}]`;
         if (a.is_manager) label += ' [manager]';
         if (a.session_id) label += ` session:${a.session_id.slice(0, 8)}`;
         if (a.kitty_win) label += ` kitty:${a.kitty_win}`;
@@ -706,7 +767,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     // Kick newly unblocked agents
     for (const u of unblocked) {
-      notifyAgent(state, u.agent, `Task unblocked: ${u.description}. Call wait_for_task() to receive it.`);
+      notifyAgent(state, u.agent);
     }
 
     const remaining = state.tasks.filter(t => t.status !== 'done').length;
@@ -793,6 +854,89 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     return { content: [{ type: 'text', text }] };
+  }
+
+  // ---- name_agent ----
+  if (name === 'name_agent') {
+    const guard = requireManager();
+    if (guard) return { content: [{ type: 'text', text: guard }], isError: true };
+    const agentId = resolveAgent(args.agent);
+    const friendlyName = args.friendly_name;
+    const state = loadState();
+    const agent = getAgent(state, agentId);
+    if (!agent) return { content: [{ type: 'text', text: `Agent ${agentId} not registered.` }], isError: true };
+    const oldName = agent.friendly_name;
+    agent.friendly_name = friendlyName;
+    saveState(state);
+    const msg = oldName
+      ? `Renamed ${agent.id}: "${oldName}" → "${friendlyName}"`
+      : `Named ${agent.id}: "${friendlyName}"`;
+    return { content: [{ type: 'text', text: msg }] };
+  }
+
+  // ---- respawn ----
+  if (name === 'respawn') {
+    const guard = requireManager();
+    if (guard) return { content: [{ type: 'text', text: guard }], isError: true };
+    const agentId = resolveAgent(args.agent);
+    const state = loadState();
+    const agent = getAgent(state, agentId);
+    if (!agent) return { content: [{ type: 'text', text: `Agent ${agentId} not found in registry.` }], isError: true };
+    if (!agent.session_id) return { content: [{ type: 'text', text: `Agent ${agentId} has no session_id — can't resume.` }], isError: true };
+
+    // Find a kitty window to use
+    let targetWin = args.win || null;
+
+    if (!targetWin && agent.kitty_win && kittyWindowExists(agent.kitty_win)) {
+      // Old window still alive — use it
+      targetWin = agent.kitty_win;
+    }
+
+    if (!targetWin) {
+      // Find any idle kitty tab via agent-windows
+      try {
+        const windowsJson = execSync(`${BIN}/agent-windows`, { encoding: 'utf8', timeout: 5000 });
+        const windows = JSON.parse(windowsJson);
+        const registeredWins = new Set((state.agents || []).filter(a => a.kitty_win).map(a => a.kitty_win));
+        if (ME) registeredWins.add(ME);
+
+        for (const win of windows) {
+          if (registeredWins.has(win.id)) continue;
+          if (win.at_prompt) {
+            targetWin = win.id;
+            break;
+          }
+        }
+      } catch (e) {
+        return { content: [{ type: 'text', text: `Failed to enumerate windows: ${e.message}` }], isError: true };
+      }
+    }
+
+    if (!targetWin) {
+      return { content: [{ type: 'text', text: `No idle kitty tab found. Open a new terminal tab and try again, or pass win explicitly.` }], isError: true };
+    }
+
+    // Build the command: cd to cwd if available, then claude --resume
+    const parts = [];
+    if (agent.cwd) parts.push(`cd ${JSON.stringify(agent.cwd)}`);
+    parts.push(`claude --resume ${agent.session_id}`);
+    const cmd = parts.join(' && ');
+
+    // Send it via agent-ask (handles Enter key properly)
+    try {
+      execSync(`${BIN}/agent-ask ${targetWin} ${JSON.stringify(cmd)}`, {
+        encoding: 'utf8', timeout: 10000,
+      });
+    } catch (e) {
+      return { content: [{ type: 'text', text: `Failed to send to kitty win ${targetWin}: ${e.message}` }], isError: true };
+    }
+
+    // Update registry: new kitty window
+    agent.kitty_win = targetWin;
+    saveState(state);
+
+    const label = agent.friendly_name || agent.name || agent.id;
+    return { content: [{ type: 'text', text: `Respawning "${label}" in win ${targetWin}: ${cmd}` }] };
   }
 
   return { content: [{ type: 'text', text: `Unknown tool: ${name}` }], isError: true };
