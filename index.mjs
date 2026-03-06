@@ -766,7 +766,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
       text = `Your task [${task.id}]: ${task.description}\nStatus: ${task.status} | ${age}m ago${depInfo}`;
     } else {
-      text = `No active task for win ${ME}. If you were kicked, run task_list() to check on agents.`;
+      text = `Nothing new.`;
     }
 
     if (unread.length > 0) {

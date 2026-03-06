@@ -54,14 +54,23 @@ print(m)
   elapsed=$((now_epoch - LAST_KICK))
   [[ $elapsed -lt $COOLDOWN ]] && continue
 
-  # Check what needs attention
+  # Check what needs attention (skip tasks for dead agents)
   summary=$(echo "$tasks" | python3 -c "
-import json, sys
+import json, sys, subprocess
 state = json.load(sys.stdin)
 tasks = state.get('tasks', [])
-pending = sum(1 for t in tasks if t['status'] == 'pending')
-idle = sum(1 for t in tasks if t['status'] == 'idle')
-blocked = sum(1 for t in tasks if t['status'] == 'blocked')
+agents = {a.get('id'): a for a in state.get('agents', [])}
+def agent_alive(t):
+    a = agents.get(t.get('agent'))
+    if not a or not a.get('kitty_win'): return True  # headless — assume alive
+    try:
+        subprocess.run(['$BIN/agent-exists', str(a['kitty_win'])], timeout=5, capture_output=True, check=True)
+        return True
+    except: return False
+live = [t for t in tasks if agent_alive(t)]
+pending = sum(1 for t in live if t['status'] == 'pending')
+idle = sum(1 for t in live if t['status'] == 'idle')
+blocked = sum(1 for t in live if t['status'] == 'blocked')
 parts = []
 if idle > 0: parts.append(f'{idle} idle agent(s) awaiting review')
 if pending > 0: parts.append(f'{pending} pending task(s)')
